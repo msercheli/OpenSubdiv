@@ -7,10 +7,10 @@ version = "3.3.3"
 authors = ["Pixar Animation Studio"]
 
 requires = [
-    "ptex",
-    "tbb",
-    "glew",
-    "glfw",
+    "tbb-4.4.6",
+    "glew-2.0.0",
+    "glfw-3.3.0",
+    "ptex-2.3.2",
 ]
 
 def commands():
