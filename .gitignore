@@ -3,6 +3,7 @@
 /build/*
 /inst*
 /.vscode/ipch
+/rezbuild
 
 *.pyc
 osdshim_wrap.cpp
