@@ -8,6 +8,7 @@ authors = ["Pixar Animation Studio"]
 
 requires = [
     "tbb",
+    "glew",
 ]
 
 def commands():
