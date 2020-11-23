@@ -25,50 +25,53 @@
 #include <D3D11.h>
 #include <D3Dcompiler.h>
 
-#include <far/error.h>
+#include <opensubdiv/far/error.h>
 
-#include <osd/cpuD3D11VertexBuffer.h>
-#include <osd/cpuEvaluator.h>
+#include <opensubdiv/osd/cpuD3D11VertexBuffer.h>
+#include <opensubdiv/osd/cpuEvaluator.h>
 
 #ifdef OPENSUBDIV_HAS_OPENMP
-    #include <osd/ompEvaluator.h>
+    #include <opensubdiv/osd/ompEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_TBB
-    #include <osd/tbbEvaluator.h>
+    #include <opensubdiv/osd/tbbEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_OPENCL_DX_INTEROP
-    #include <osd/clD3D11VertexBuffer.h>
-    #include <osd/clEvaluator.h>
+    #include <opensubdiv/osd/clD3D11VertexBuffer.h>
+    #include <opensubdiv/osd/clEvaluator.h>
     #include "../common/clDeviceContext.h"
     CLD3D11DeviceContext g_clDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_CUDA
-    #include <osd/cudaD3D11VertexBuffer.h>
-    #include <osd/cudaEvaluator.h>
+    #include <opensubdiv/osd/cudaD3D11VertexBuffer.h>
+    #include <opensubdiv/osd/cudaEvaluator.h>
     #include "../common/cudaDeviceContext.h"
     CudaDeviceContext g_cudaDeviceContext;
 #endif
 
-#include <osd/d3d11VertexBuffer.h>
-#include <osd/d3d11ComputeEvaluator.h>
+#include <opensubdiv/osd/d3d11VertexBuffer.h>
+#include <opensubdiv/osd/d3d11ComputeEvaluator.h>
 
-#include <osd/d3d11Mesh.h>
-#include <osd/d3d11LegacyGregoryPatchTable.h>
+#include <opensubdiv/osd/d3d11Mesh.h>
+#include <opensubdiv/osd/d3d11LegacyGregoryPatchTable.h>
 OpenSubdiv::Osd::D3D11MeshInterface *g_mesh = NULL;
 OpenSubdiv::Osd::D3D11LegacyGregoryPatchTable *g_legacyGregoryPatchTable = NULL;
+bool g_legacyGregoryEnabled = false;
 
 #include "../../regression/common/far_utils.h"
+#include "../../regression/common/arg_utils.h"
 #include "../common/stopwatch.h"
 #include "../common/simple_math.h"
 #include "../common/d3d11ControlMeshDisplay.h"
 #include "../common/d3d11Hud.h"
 #include "../common/d3d11Utils.h"
 #include "../common/d3d11ShaderCache.h"
+#include "../common/viewerArgsUtils.h"
 
-#include <osd/hlslPatchShaderSource.h>
+#include <opensubdiv/osd/hlslPatchShaderSource.h>
 static const char *shaderSource =
 #include "shader.gen.h"
 ;
@@ -97,10 +100,11 @@ enum DisplayStyle { kDisplayStyleWire = 0,
 
 enum ShadingMode { kShadingMaterial,
                    kShadingPatchType,
+                   kShadingPatchDepth,
                    kShadingPatchCoord,
                    kShadingNormal };
 
-enum EndCap      { kEndCapNone = 0,
+enum EndCap      { kEndCapBilinearBasis = 0,
                    kEndCapBSplineBasis,
                    kEndCapGregoryBasis,
                    kEndCapLegacyGregory };
@@ -114,7 +118,11 @@ enum HudCheckBox { kHUD_CB_DISPLAY_CONTROL_MESH_EDGES,
                    kHUD_CB_FRACTIONAL_SPACING,
                    kHUD_CB_PATCH_CULL,
                    kHUD_CB_FREEZE,
-                   kHUD_CB_DISPLAY_PATCH_COUNTS };
+                   kHUD_CB_DISPLAY_PATCH_COUNTS,
+                   kHUD_CB_ADAPTIVE,
+                   kHUD_CB_SMOOTH_CORNER_PATCH,
+                   kHUD_CB_SINGLE_CREASE_PATCH,
+                   kHUD_CB_INF_SHARP_PATCH };
 
 int g_currentShape = 0;
 
@@ -126,15 +134,16 @@ int   g_freeze = 0,
       g_shadingMode = kShadingPatchType,
       g_displayStyle = kDisplayStyleWireOnShaded,
       g_adaptive = 1,
-      g_endCap = kEndCapBSplineBasis,
+      g_endCap = kEndCapGregoryBasis,
+      g_smoothCornerPatch = 1,
       g_singleCreasePatch = 1,
-      g_infSharpPatch = 0,
+      g_infSharpPatch = 1,
       g_drawNormals = 0,
       g_mbutton[3] = {0, 0, 0};
 
-int   g_screenSpaceTess = 1,
-      g_fractionalSpacing = 1,
-      g_patchCull = 1,
+int   g_screenSpaceTess = 0,
+      g_fractionalSpacing = 0,
+      g_patchCull = 0,
       g_displayPatchCounts = 0;
 
 float g_rotate[2] = {0, 0},
@@ -144,6 +153,8 @@ float g_rotate[2] = {0, 0},
       g_pan[2] = {0, 0},
       g_center[3] = {0, 0, 0},
       g_size = 0;
+
+bool  g_yup = false;
 
 int   g_width = 1024,
       g_height = 1024;
@@ -245,7 +256,7 @@ updateGeom() {
 static const char *
 getKernelName(int kernel) {
 
-         if (kernel == kCPU)
+    if (kernel == kCPU)
         return "CPU";
     else if (kernel == kOPENMP)
         return "OpenMP";
@@ -267,7 +278,7 @@ createOsdMesh(ShapeDesc const & shapeDesc, int level, int kernel, Scheme scheme=
     using namespace OpenSubdiv;
     typedef Far::ConstIndexArray IndexArray;
 
-    Shape * shape = Shape::parseObj(shapeDesc.data.c_str(), shapeDesc.scheme);
+    Shape * shape = Shape::parseObj(shapeDesc);
 
     // create Far mesh (topology)
     Sdc::SchemeType sdctype = GetSdcType(*shape);
@@ -292,18 +303,15 @@ createOsdMesh(ShapeDesc const & shapeDesc, int level, int kernel, Scheme scheme=
 
     g_scheme = scheme;
 
-    // Adaptive refinement currently supported only for catmull-clark scheme
-    bool doAdaptive = (g_adaptive!=0 && g_scheme==kCatmark),
-         doSingleCreasePatch = (g_singleCreasePatch!=0 && g_scheme==kCatmark),
-         doInfSharpPatch = (g_infSharpPatch!=0 && g_scheme==kCatmark);
-
     Osd::MeshBitset bits;
-    bits.set(Osd::MeshAdaptive, doAdaptive);
-    bits.set(Osd::MeshUseSingleCreasePatch, doSingleCreasePatch);
-    bits.set(Osd::MeshUseInfSharpPatch, doInfSharpPatch);
-    bits.set(Osd::MeshEndCapBSplineBasis, g_endCap == kEndCapBSplineBasis);
-    bits.set(Osd::MeshEndCapGregoryBasis, g_endCap == kEndCapGregoryBasis);
-    bits.set(Osd::MeshEndCapLegacyGregory, g_endCap == kEndCapLegacyGregory);
+    bits.set(Osd::MeshAdaptive, g_adaptive != 0);
+    bits.set(Osd::MeshUseSmoothCornerPatch, g_smoothCornerPatch != 0);
+    bits.set(Osd::MeshUseSingleCreasePatch, g_singleCreasePatch != 0);
+    bits.set(Osd::MeshUseInfSharpPatch,     g_infSharpPatch != 0);
+    bits.set(Osd::MeshEndCapBilinearBasis,  g_endCap == kEndCapBilinearBasis);
+    bits.set(Osd::MeshEndCapBSplineBasis,   g_endCap == kEndCapBSplineBasis);
+    bits.set(Osd::MeshEndCapGregoryBasis,   g_endCap == kEndCapGregoryBasis);
+    bits.set(Osd::MeshEndCapLegacyGregory,  g_endCap == kEndCapLegacyGregory);
 
     int numVertexElements = 6;
     int numVaryingElements = 0;
@@ -515,7 +523,8 @@ public:
         if (effectDesc.effect.patchCull) {
             ss << "#define OSD_ENABLE_PATCH_CULL\n";
         }
-        if (effectDesc.effect.singleCreasePatch) {
+        if (effectDesc.effect.singleCreasePatch &&
+            type == Far::PatchDescriptor::REGULAR) {
             ss << "#define OSD_PATCH_ENABLE_SINGLE_CREASE\n";
         }
         // for legacy gregory
@@ -546,6 +555,9 @@ public:
         case kShadingMaterial:
             ss << "#define SHADING_MATERIAL\n";
             break;
+        case kShadingPatchDepth:
+            ss << "#define SHADING_PATCH_DEPTH\n";
+            break;
         case kShadingPatchType:
             ss << "#define SHADING_PATCH_TYPE\n";
             break;
@@ -564,6 +576,10 @@ public:
             ss << "#define OSD_PATCH_GREGORY_BOUNDARY\n";
         } else if (type == Far::PatchDescriptor::GREGORY_BASIS) {
             ss << "#define OSD_PATCH_GREGORY_BASIS\n";
+        } else if (type == Far::PatchDescriptor::LOOP) {
+            ss << "#define OSD_PATCH_LOOP\n";
+        } else if (type == Far::PatchDescriptor::GREGORY_TRIANGLE) {
+            ss << "#define OSD_PATCH_GREGORY_TRIANGLE\n";
         }
 
         // include osd PatchCommon
@@ -695,7 +711,9 @@ bindProgram(Effect effect, OpenSubdiv::Osd::PatchArray const & patch) {
         rotate(pData->ModelViewMatrix, g_rotate[1], 1, 0, 0);
         rotate(pData->ModelViewMatrix, g_rotate[0], 0, 1, 0);
         translate(pData->ModelViewMatrix, -g_center[0], -g_center[2], g_center[1]); // z-up model
-        rotate(pData->ModelViewMatrix, -90, 1, 0, 0); // z-up model
+        if (!g_yup) {
+            rotate(pData->ModelViewMatrix, -90, 1, 0, 0); // z-up model
+        }
         inverseMatrix(pData->ModelViewInverseMatrix, pData->ModelViewMatrix);
 
         identity(pData->ProjectionMatrix);
@@ -844,9 +862,10 @@ display() {
         g_mesh->GetPatchTable()->GetPatchIndexBuffer(), DXGI_FORMAT_R32_UINT, 0);
 
     // patch drawing
-    int patchCount[12]; // [Type] (see far/patchTable.h)
+    int patchCount[13]; // [Type] (see far/patchTable.h)
     int numTotalPatches = 0;
     int numDrawCalls = 0;
+    memset(patchCount, 0, sizeof(patchCount));
 
     for (int i=0; i<(int)patches.size(); ++i) {
         OpenSubdiv::Osd::PatchArray const & patch = patches[i];
@@ -877,8 +896,14 @@ display() {
             case 12:
                 topology = D3D11_PRIMITIVE_TOPOLOGY_12_CONTROL_POINT_PATCHLIST;
                 break;
+            case 15:
+                topology = D3D11_PRIMITIVE_TOPOLOGY_15_CONTROL_POINT_PATCHLIST;
+                break;
             case 16:
                 topology = D3D11_PRIMITIVE_TOPOLOGY_16_CONTROL_POINT_PATCHLIST;
+                break;
+            case 18:
+                topology = D3D11_PRIMITIVE_TOPOLOGY_18_CONTROL_POINT_PATCHLIST;
                 break;
             case 20:
                 topology = D3D11_PRIMITIVE_TOPOLOGY_20_CONTROL_POINT_PATCHLIST;
@@ -913,18 +938,26 @@ display() {
         double fps = 1.0/g_fpsTimer.GetElapsed();
 
         if (g_displayPatchCounts) {
-            int x = -280;
-            int y = -180;
-            g_hud->DrawString(x, y, "NonPatch         : %d",
+            int x = -420;
+            int y = g_legacyGregoryEnabled ? -180 : -140;
+            g_hud->DrawString(x, y, "Quads            : %d",
                              patchCount[Descriptor::QUADS]); y += 20;
+            g_hud->DrawString(x, y, "Triangles        : %d",
+                             patchCount[Descriptor::TRIANGLES]); y += 20;
             g_hud->DrawString(x, y, "Regular          : %d",
                              patchCount[Descriptor::REGULAR]); y+= 20;
-            g_hud->DrawString(x, y, "Gregory          : %d",
-                             patchCount[Descriptor::GREGORY]); y+= 20;
-            g_hud->DrawString(x, y, "Boundary Gregory : %d",
-                             patchCount[Descriptor::GREGORY_BOUNDARY]); y+= 20;
+            g_hud->DrawString(x, y, "Loop             : %d",
+                             patchCount[Descriptor::LOOP]); y+= 20;
+            if (g_legacyGregoryEnabled) {
+                g_hud->DrawString(x, y, "Gregory          : %d",
+                                 patchCount[Descriptor::GREGORY]); y+= 20;
+                g_hud->DrawString(x, y, "Boundary Gregory : %d",
+                                 patchCount[Descriptor::GREGORY_BOUNDARY]); y+= 20;
+            }
             g_hud->DrawString(x, y, "Gregory Basis    : %d",
                              patchCount[Descriptor::GREGORY_BASIS]); y+= 20;
+            g_hud->DrawString(x, y, "Gregory Triangle : %d",
+                             patchCount[Descriptor::GREGORY_TRIANGLE]); y+= 20;
         }
 
         g_hud->DrawString(10, -120, "Tess level : %d", g_tessLevel);
@@ -1100,34 +1133,6 @@ callbackShadingMode(int b) {
 
 
 static void
-callbackAnimate(bool checked, int m) {
-    g_moveScale = checked;
-}
-
-static void
-callbackFreeze(bool checked, int f) {
-    g_freeze = checked;
-}
-
-static void
-callbackAdaptive(bool checked, int a) {
-    g_adaptive = checked;
-    rebuildOsdMesh();
-}
-
-static void
-callbackSingleCreasePatch(bool checked, int /* a */) {
-    g_singleCreasePatch = checked;
-    rebuildOsdMesh();
-}
-
-static void
-callbackInfSharpPatch(bool checked, int /* a */) {
-    g_infSharpPatch = checked;
-    rebuildOsdMesh();
-}
-
-static void
 callbackCheckBox(bool checked, int button) {
     switch (button) {
     case kHUD_CB_DISPLAY_CONTROL_MESH_EDGES:
@@ -1153,6 +1158,22 @@ callbackCheckBox(bool checked, int button) {
         break;
     case kHUD_CB_DISPLAY_PATCH_COUNTS:
         g_displayPatchCounts = checked;
+        break;
+    case kHUD_CB_ADAPTIVE:
+        g_adaptive = checked;
+        rebuildOsdMesh();
+        break;
+    case kHUD_CB_SMOOTH_CORNER_PATCH:
+        g_smoothCornerPatch = checked;
+        rebuildOsdMesh();
+        break;
+    case kHUD_CB_SINGLE_CREASE_PATCH:
+        g_singleCreasePatch = checked;
+        rebuildOsdMesh();
+        break;
+    case kHUD_CB_INF_SHARP_PATCH:
+        g_infSharpPatch = checked;
+        rebuildOsdMesh();
         break;
     }
 }
@@ -1200,6 +1221,9 @@ initHUD() {
     g_hud->AddPullDownButton(shading_pulldown, "Patch Type",
                             kShadingPatchType,
                             g_shadingMode == kShadingPatchType);
+    g_hud->AddPullDownButton(shading_pulldown, "Patch Depth",
+                            kShadingPatchDepth,
+                            g_shadingMode == kShadingPatchCoord);
     g_hud->AddPullDownButton(shading_pulldown, "Patch Coord",
                             kShadingPatchCoord,
                             g_shadingMode == kShadingPatchCoord);
@@ -1234,24 +1258,31 @@ initHUD() {
                        10, y, callbackCheckBox, kHUD_CB_FREEZE, ' ');
     y += 20;
 
-    g_hud->AddCheckBox("Adaptive (`)", true, 10, 190, callbackAdaptive, 0, '`');
-    g_hud->AddCheckBox("Single Crease Patch (S)", g_singleCreasePatch!=0, 10, 210, callbackSingleCreasePatch, 0, 'S');
-    g_hud->AddCheckBox("Inf Sharp Patch (I)", g_infSharpPatch!=0, 10, 230, callbackInfSharpPatch, 0, 'I');
+    g_hud->AddCheckBox("Adaptive (`)", true,
+                       10, 190, callbackCheckBox, kHUD_CB_ADAPTIVE, '`');
+    g_hud->AddCheckBox("Smooth Corner Patch (O)", g_smoothCornerPatch!=0,
+                       10, 210, callbackCheckBox, kHUD_CB_SMOOTH_CORNER_PATCH, 'O');
+    g_hud->AddCheckBox("Single Crease Patch (S)", g_singleCreasePatch!=0,
+                       10, 230, callbackCheckBox, kHUD_CB_SINGLE_CREASE_PATCH, 'S');
+    g_hud->AddCheckBox("Inf Sharp Patch (I)", g_infSharpPatch!=0,
+                       10, 250, callbackCheckBox, kHUD_CB_INF_SHARP_PATCH, 'I');
 
     int endcap_pulldown = g_hud->AddPullDown(
-        "End cap (E)", 10, 250, 200, callbackEndCap, 'E');
-    g_hud->AddPullDownButton(endcap_pulldown,"None",
-                             kEndCapNone,
-                             g_endCap == kEndCapNone);
-    g_hud->AddPullDownButton(endcap_pulldown, "BSpline",
+        "End cap (E)", 10, 270, 200, callbackEndCap, 'E');
+    g_hud->AddPullDownButton(endcap_pulldown,"Linear",
+                             kEndCapBilinearBasis,
+                             g_endCap == kEndCapBilinearBasis);
+    g_hud->AddPullDownButton(endcap_pulldown, "Regular",
                              kEndCapBSplineBasis,
                              g_endCap == kEndCapBSplineBasis);
-    g_hud->AddPullDownButton(endcap_pulldown, "GregoryBasis",
+    g_hud->AddPullDownButton(endcap_pulldown, "Gregory",
                              kEndCapGregoryBasis,
                              g_endCap == kEndCapGregoryBasis);
-    g_hud->AddPullDownButton(endcap_pulldown, "LegacyGregory",
-                             kEndCapLegacyGregory,
-                             g_endCap == kEndCapLegacyGregory);
+    if (g_legacyGregoryEnabled) {
+        g_hud->AddPullDownButton(endcap_pulldown, "LegacyGregory",
+                                 kEndCapLegacyGregory,
+                                 g_endCap == kEndCapLegacyGregory);
+    }
 
     for (int i = 1; i < 11; ++i) {
         char level[16];
@@ -1264,7 +1295,7 @@ initHUD() {
         g_hud->AddPullDownButton(shapes_pulldown, g_defaultShapes[i].name.c_str(),i);
     }
 
-    g_hud->AddCheckBox("Show patch counts", g_displayPatchCounts!=0, -280, -20, callbackCheckBox, kHUD_CB_DISPLAY_PATCH_COUNTS);
+    g_hud->AddCheckBox("Show patch counts", g_displayPatchCounts!=0, -420, -20, callbackCheckBox, kHUD_CB_DISPLAY_PATCH_COUNTS);
 
     callbackModel(g_currentShape);
 }
@@ -1513,22 +1544,10 @@ msgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return DefWindowProc(hWnd, msg, wParam, lParam);
 }
 
-static std::vector<std::string>
-tokenize(std::string const & src) {
-
-    std::vector<std::string> result;
-
-    std::stringstream input(src);
-    std::copy(std::istream_iterator<std::string>(input),
-              std::istream_iterator<std::string>(),
-              std::back_inserter< std::vector<std::string> >(result));
-
-    return result;
-}
-
 int WINAPI
-WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmdShow) {
-
+WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, 
+        int nCmdShow) 
+{
     // register window class
     TCHAR szWindowClass[] = "OPENSUBDIV_EXAMPLE";
     WNDCLASS wcex;
@@ -1548,7 +1567,8 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmd
     RECT rect = { 0, 0, g_width, g_height };
     AdjustWindowRect(&rect, WS_OVERLAPPEDWINDOW, FALSE);
 
-    static const char windowTitle[] = "OpenSubdiv dxViewer " OPENSUBDIV_VERSION_STRING;
+    static const char windowTitle[] = 
+        "OpenSubdiv dxViewer " OPENSUBDIV_VERSION_STRING;
 
     HWND hWnd = CreateWindow(szWindowClass,
                         windowTitle,
@@ -1562,35 +1582,24 @@ WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPTSTR lpCmdLine, int nCmd
                         hInstance,
                         NULL);
 
-    std::vector<std::string> args = tokenize(lpCmdLine);
-    for (size_t i=0; i<args.size(); ++i) {
-        std::ifstream ifs(args[i]);
-        if (ifs) {
-            std::stringstream ss;
-            ss << ifs.rdbuf();
-            ifs.close();
-            std::string str = ss.str();
-            g_defaultShapes.push_back(ShapeDesc(__argv[1], str.c_str(), kCatmark));
+    // Parse the command line arguments
+    ArgOptions args;
+    args.Parse(__argc, __argv);
+    const std::vector<const char *> &rargs = args.GetRemainingArgs();
+    for (size_t i = 0; i < rargs.size(); ++i) {
+        if (!strcmp(rargs[i], "-lg")) {
+            g_legacyGregoryEnabled = true;
+        } else {
+            args.PrintUnrecognizedArgWarning(rargs[i]);
         }
     }
 
-    std::string str;
-    for (int i = 1; i < __argc; ++i) {
-        if (!strcmp(__argv[i], "-d"))
-            g_level = atoi(__argv[++i]);
-        else if (!strcmp(__argv[i], "-c"))
-            g_repeatCount = atoi(__argv[++i]);
-        else {
-            std::ifstream ifs(__argv[1]);
-            if (ifs) {
-                std::stringstream ss;
-                ss << ifs.rdbuf();
-                ifs.close();
-                str = ss.str();
-                g_defaultShapes.push_back(ShapeDesc(__argv[1], str.c_str(), kCatmark));
-            }
-        }
-    }
+    g_yup = args.GetYUp();
+    g_adaptive = args.GetAdaptive();
+    g_level = args.GetLevel();
+    g_repeatCount = args.GetRepeatCount();
+
+    ViewerArgsUtils::PopulateShapes(args, &g_defaultShapes);
 
     initShapes();
 

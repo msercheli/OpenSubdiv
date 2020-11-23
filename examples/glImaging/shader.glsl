@@ -44,6 +44,13 @@
         mix(mix(inpt[a].color, inpt[b].color, UV.x), \
             mix(inpt[c].color, inpt[d].color, UV.x), UV.y)
 
+#undef OSD_USER_VARYING_PER_EVAL_POINT_TRIANGLE
+#define OSD_USER_VARYING_PER_EVAL_POINT_TRIANGLE(UV, a, b, c) \
+    outpt.color = \
+        inpt[a].color * (1.0f - UV.x - UV.y) + \
+        inpt[b].color * UV.x + \
+        inpt[c].color * UV.y;
+
 //--------------------------------------------------------------
 // Uniforms / Uniform Blocks
 //--------------------------------------------------------------
@@ -320,11 +327,11 @@ getAdaptivePatchColor(ivec3 patchParam)
         vec4(0.0f,  0.8f,  0.75f, 1.0f),   // boundary pattern 4
 
         vec4(0.0f,  1.0f,  0.0f,  1.0f),   // corner
-        vec4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 0
-        vec4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 1
-        vec4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 2
-        vec4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 3
-        vec4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 4
+        vec4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 0
+        vec4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 1
+        vec4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 2
+        vec4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 3
+        vec4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 4
 
         vec4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
         vec4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
@@ -354,8 +361,8 @@ getAdaptivePatchColor(ivec3 patchParam)
     if (edgeCount == 1) {
         patchType = 2; // BOUNDARY
     }
-    if (edgeCount == 2) {
-        patchType = 3; // CORNER
+    if (edgeCount > 1) {
+        patchType = 3; // CORNER (not correct for patches that are not isolated)
     }
 
 #if defined OSD_PATCH_ENABLE_SINGLE_CREASE
@@ -368,6 +375,8 @@ getAdaptivePatchColor(ivec3 patchParam)
 #elif defined OSD_PATCH_GREGORY_BOUNDARY
     patchType = 5;
 #elif defined OSD_PATCH_GREGORY_BASIS
+    patchType = 6;
+#elif defined OSD_PATCH_GREGORY_TRIANGLE
     patchType = 6;
 #endif
 

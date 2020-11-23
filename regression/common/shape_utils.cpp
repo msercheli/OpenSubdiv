@@ -61,8 +61,8 @@ Shape::~Shape() {
 }
 
 //------------------------------------------------------------------------------
-Shape * Shape::parseObj(char const * shapestr, Scheme shapescheme,
-                        bool isLeftHanded, int axis, bool parsemtl) {
+Shape * Shape::parseObj(char const * shapestr, Scheme shapescheme, bool isLeftHanded,
+                        bool parsemtl) {
 
     Shape * s = new Shape;
 
@@ -73,19 +73,17 @@ Shape * Shape::parseObj(char const * shapestr, Scheme shapescheme,
     bool done = false;
     while (! done) {
         done = sgets(line, sizeof(line), &str)==0;
-        char* end = &line[strlen(line)-1];
-        if (*end == '\n') *end = '\0'; // strip trailing nl
+        if (line[0]) {
+          char* end = &line[strlen(line)-1];
+          if (*end == '\n') *end = '\0'; // strip trailing nl
+        }
         float x, y, z, u, v;
         switch (line[0]) {
             case 'v': switch (line[1]) {
                           case ' ': if (sscanf(line, "v %f %f %f", &x, &y, &z) == 3) {
                                          s->verts.push_back(x);
-                                         switch( axis ) {
-                                             case 0 : s->verts.push_back(-z);
-                                                      s->verts.push_back(y); break;
-                                             case 1 : s->verts.push_back(y);
-                                                      s->verts.push_back(z); break;
-                                         }
+                                         s->verts.push_back(y);
+                                         s->verts.push_back(z);
                                     } break;
                           case 't': if (sscanf(line, "vt %f %f", &u, &v) == 2) {
                                         s->uvs.push_back(u);
@@ -137,6 +135,12 @@ Shape * Shape::parseObj(char const * shapestr, Scheme shapescheme,
         }
     }
     return s;
+}
+
+//------------------------------------------------------------------------------
+Shape * Shape::parseObj(ShapeDesc const & shapeDesc, bool parsemtl) {
+    return parseObj(shapeDesc.data.c_str(), shapeDesc.scheme, shapeDesc.isLeftHanded,
+                    parsemtl);
 }
 
 //------------------------------------------------------------------------------

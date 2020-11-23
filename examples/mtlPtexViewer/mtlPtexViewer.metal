@@ -1,6 +1,6 @@
 #line 0 "examples/mtlPtexViewer/mtlPtexViewer.metal"
 //
-//   Copyright 2013 Pixar
+//   Copyright 2013-2019 Pixar
 //
 //   Licensed under the Apache License, Version 2.0 (the "Apache License")
 //   with the following modification; you may not use this file except in
@@ -26,6 +26,10 @@
 #include <metal_stdlib>
 using namespace metal;
 
+#if OSD_IS_ADAPTIVE
+static_assert(!OSD_ENABLE_SCREENSPACE_TESSELLATION || !USE_PTVS_FACTORS, "USE_PTVS_FACTORS cannot be enabled if OSD_ENABLE_SCREENSPACE_TESSELLATION is enabled");
+#endif
+
 struct Config {
     float displacementScale;
     float mipmapBias;
@@ -48,42 +52,42 @@ const constant float4 patchColors[] = {
     float4(0.0f,  0.5f,  0.5f,  1.0f),   // regular pattern 2
     float4(0.5f,  0.0f,  1.0f,  1.0f),   // regular pattern 3
     float4(1.0f,  0.5f,  1.0f,  1.0f),   // regular pattern 4
-    
+
     float4(1.0f,  0.5f,  0.5f,  1.0f),   // single crease
     float4(1.0f,  0.70f,  0.6f,  1.0f),  // single crease pattern 0
     float4(1.0f,  0.65f,  0.6f,  1.0f),  // single crease pattern 1
     float4(1.0f,  0.60f,  0.6f,  1.0f),  // single crease pattern 2
     float4(1.0f,  0.55f,  0.6f,  1.0f),  // single crease pattern 3
     float4(1.0f,  0.50f,  0.6f,  1.0f),  // single crease pattern 4
-    
+
     float4(0.8f,  0.0f,  0.0f,  1.0f),   // boundary
     float4(0.0f,  0.0f,  0.75f, 1.0f),   // boundary pattern 0
     float4(0.0f,  0.2f,  0.75f, 1.0f),   // boundary pattern 1
     float4(0.0f,  0.4f,  0.75f, 1.0f),   // boundary pattern 2
     float4(0.0f,  0.6f,  0.75f, 1.0f),   // boundary pattern 3
     float4(0.0f,  0.8f,  0.75f, 1.0f),   // boundary pattern 4
-    
+
     float4(0.0f,  1.0f,  0.0f,  1.0f),   // corner
-    float4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 0
-    float4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 1
-    float4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 2
-    float4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 3
-    float4(0.25f, 0.25f, 0.25f, 1.0f),   // corner pattern 4
-    
+    float4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 0
+    float4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 1
+    float4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 2
+    float4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 3
+    float4(0.5f,  1.0f,  0.5f,  1.0f),   // corner pattern 4
+
     float4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
     float4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
     float4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
     float4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
     float4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
     float4(1.0f,  1.0f,  0.0f,  1.0f),   // gregory
-    
+
     float4(1.0f,  0.5f,  0.0f,  1.0f),   // gregory boundary
     float4(1.0f,  0.5f,  0.0f,  1.0f),   // gregory boundary
     float4(1.0f,  0.5f,  0.0f,  1.0f),   // gregory boundary
     float4(1.0f,  0.5f,  0.0f,  1.0f),   // gregory boundary
     float4(1.0f,  0.5f,  0.0f,  1.0f),   // gregory boundary
     float4(1.0f,  0.5f,  0.0f,  1.0f),   // gregory boundary
-    
+
     float4(1.0f,  0.7f,  0.3f,  1.0f),   // gregory basis
     float4(1.0f,  0.7f,  0.3f,  1.0f),   // gregory basis
     float4(1.0f,  0.7f,  0.3f,  1.0f),   // gregory basis
@@ -94,34 +98,33 @@ const constant float4 patchColors[] = {
 
 float4
 getAdaptivePatchColor(int3 patchParam, float sharpness)
-{  
-    int pattern = popcount(OsdGetPatchTransitionMask(patchParam));
-    int edgeCount = popcount(OsdGetPatchBoundaryMask(patchParam));
-    
+{
     int patchType = 0;
-#if OSD_PATCH_ENABLE_SINGLE_CREASE
-    if (sharpness > 0) {
-        pattern = 1;
-    }
-#endif
 
+    int edgeCount = popcount(OsdGetPatchBoundaryMask(patchParam));
     if (edgeCount == 1) {
         patchType = 2; // BOUNDARY
     }
-    if (edgeCount == 2) {
+    if (edgeCount > 1) {
         patchType = 3; // CORNER
     }
-    
-    // XXX: it looks like edgeCount != 0 for some gregory boundary patches.
-    //      there might be a bug somewhere...
-#if OSD_PATCH_GREGORY
+
+#if OSD_PATCH_ENABLE_SINGLE_CREASE
+    if (sharpness > 0) {
+        patchType = 1;
+    }
+#elif OSD_PATCH_GREGORY
     patchType = 4;
 #elif OSD_PATCH_GREGORY_BOUNDARY
     patchType = 5;
 #elif OSD_PATCH_GREGORY_BASIS
     patchType = 6;
+#elif OSD_PATCH_GREGORY_TRIANGLE
+    patchType = 6;
 #endif
-    
+
+    int pattern = popcount(OsdGetPatchTransitionMask(patchParam));
+
     return patchColors[6*patchType + pattern];
 }
 
@@ -149,7 +152,7 @@ float3 displacement(float3 position, float3 normal, float4 patchCoord, float mip
                     ,device ushort* textureDisplace_Packing
 #endif
                     )
-{    
+{
 #if DISPLACEMENT_HW_BILINEAR
     float disp = PtexLookupFast(patchCoord, mipmapBias,
                                 textureDisplace_Data,
@@ -184,7 +187,7 @@ perturbNormalFromDisplacement(float3 position, float3 normal, float4 patchCoord,
 {
     // by Morten S. Mikkelsen
     // http://jbit.net/~sparky/sfgrad_bump/mm_sfgrad_bump.pdf
-    // slightly modified for ptex guttering 
+    // slightly modified for ptex guttering
     float3 vSigmaS = dfdx(position);
     float3 vSigmaT = dfdy(position);
     float3 vN = normal;
@@ -198,11 +201,11 @@ perturbNormalFromDisplacement(float3 position, float3 normal, float4 patchCoord,
 #else
     float2 texDx = dfdx(patchCoord.xy);
     float2 texDy = dfdy(patchCoord.xy);
-    
+
     // limit forward differencing to the width of ptex gutter
     const float resolution = 128.0;
     float d = min(1.0f, (0.5/resolution)/max(length(texDx), length(texDy)));
-    
+
     float4 STll = patchCoord;
     float4 STlr = patchCoord + d * float4(texDx.x, texDx.y, 0, 0);
     float4 STul = patchCoord + d * float4(texDy.x, texDy.y, 0, 0);
@@ -218,7 +221,7 @@ perturbNormalFromDisplacement(float3 position, float3 normal, float4 patchCoord,
     float dBs = (Hlr - Hll)/d;
     float dBt = (Hul - Hll)/d;
 #endif
-    
+
     float3 vSurfGrad = sign(fDet) * (dBs * vR1 + dBt * vR2);
     return normalize(abs(fDet) * vN - vSurfGrad);
 }
@@ -248,10 +251,9 @@ struct FragmentInput
 
 #if OSD_IS_ADAPTIVE
 #if USE_STAGE_IN
-#if OSD_PATCH_REGULAR
+#if OSD_PATCH_REGULAR || OSD_PATCH_BOX_SPLINE_TRIANGLE
 struct ControlPoint
 {
-    
     float3 P [[attribute(0)]];
 #if OSD_PATCH_ENABLE_SINGLE_CREASE
     float3 P1 [[attribute(1)]];
@@ -261,6 +263,21 @@ struct ControlPoint
 #endif
 #endif
 };
+#elif OSD_PATCH_GREGORY || OSD_PATCH_GREGORY_BOUNDARY
+struct ControlPoint
+{
+    float3 P [[attribute(0)]];
+    float3 Ep [[attribute(1)]];
+    float3 Em [[attribute(2)]];
+    float3 Fp [[attribute(3)]];
+    float3 Fm [[attribute(4)]];
+};
+#elif OSD_PATCH_GREGORY_BASIS || OSD_PATCH_GREGORY_TRIANGLE
+struct ControlPoint
+{
+    float3 position [[attribute(0)]];
+};
+#endif
 
 struct PatchInput
 {
@@ -271,35 +288,15 @@ struct PatchInput
 #endif
     int3 patchParam [[attribute(10)]];
 };
-#elif OSD_PATCH_GREGORY || OSD_PATCH_GREGORY_BOUNDARY
-struct ControlPoint
-{
-    
-    float3 P [[attribute(0)]];
-    float3 Ep [[attribute(1)]];
-    float3 Em [[attribute(2)]];
-    float3 Fp [[attribute(3)]];
-    float3 Fm [[attribute(4)]];
-};
-
-struct PatchInput
-{
-    patch_control_point<ControlPoint> cv;
-    int3 patchParam [[attribute(10)]];
-};
-#elif OSD_PATCH_GREGORY_BASIS
-struct ControlPoint
-{
-    float3 position [[attribute(0)]];
-};
-
-struct PatchInput
-{
-    patch_control_point<ControlPoint> cv;
-    int3 patchParam [[attribute(10)]];
-};
 #endif
+
+
+#if OSD_PATCH_REGULAR || OSD_PATCH_GREGORY_BASIS || OSD_PATCH_GREGORY || OSD_PATCH_GREGORY_BOUNDARY
+typedef MTLQuadTessellationFactorsHalf PatchTessFactors;
+#elif OSD_PATCH_BOX_SPLINE_TRIANGLE || OSD_PATCH_GREGORY_TRIANGLE
+typedef MTLTriangleTessellationFactorsHalf PatchTessFactors;
 #endif
+
 
 kernel void compute_main(
     const constant PerFrameConstants& frameConsts [[buffer(FRAME_CONST_BUFFER_INDEX)]],
@@ -307,41 +304,51 @@ kernel void compute_main(
     unsigned thread_position_in_threadgroup [[thread_position_in_threadgroup]],
     unsigned threadgroup_position_in_grid [[threadgroup_position_in_grid]],
     OsdPatchParamBufferSet osdBuffers,
-    device MTLQuadTessellationFactorsHalf* quadTessellationFactors [[buffer(QUAD_TESSFACTORS_INDEX)]]
+    device PatchTessFactors* patchTessellationFactors [[buffer(PATCH_TESSFACTORS_INDEX)]]
 #if OSD_USE_PATCH_INDEX_BUFFER
     ,device unsigned* patchIndex [[buffer(OSD_PATCH_INDEX_BUFFER_INDEX)]]
     ,device MTLDrawPatchIndirectArguments* drawIndirectCommands [[buffer(OSD_DRAWINDIRECT_BUFFER_INDEX)]]
 #endif
 )
 {
+    //----------------------------------------------------------
+    // OSD Kernel Setup
+    //----------------------------------------------------------
 
+    #define PATCHES_PER_THREADGROUP (THREADS_PER_THREADGROUP / THREADS_PER_PATCH)
+    int const primitiveID = thread_position_in_grid / THREADS_PER_PATCH;
+    int const primitiveIDInTG = thread_position_in_threadgroup / THREADS_PER_PATCH;
+    int const vertexIndex = threadgroup_position_in_grid * PATCHES_PER_THREADGROUP * CONTROL_POINTS_PER_PATCH +
+                            thread_position_in_threadgroup * CONTROL_POINTS_PER_THREAD;
+    int const vertexIndexInTG = thread_position_in_threadgroup * CONTROL_POINTS_PER_THREAD;
+    int const invocationID = (thread_position_in_threadgroup * VERTEX_CONTROL_POINTS_PER_THREAD) % (THREADS_PER_PATCH*VERTEX_CONTROL_POINTS_PER_THREAD);
+
+    //Contains the shared patchParam value used by all threads that act upon a single patch
+    //the .z (sharpness) field is set to -1 (NAN) if that patch should be culled to signal other threads to return.
     threadgroup int3 patchParam[PATCHES_PER_THREADGROUP];
     threadgroup PatchVertexType patchVertices[PATCHES_PER_THREADGROUP * CONTROL_POINTS_PER_PATCH];
 
-    const auto real_threadgroup = thread_position_in_grid / REAL_THREADGROUP_DIVISOR;
-    const auto subthreadgroup_in_threadgroup = thread_position_in_threadgroup / REAL_THREADGROUP_DIVISOR;
-    const auto real_thread_in_threadgroup = thread_position_in_threadgroup & (REAL_THREADGROUP_DIVISOR - 1);
-
-#if NEEDS_BARRIER
-    const auto validThread = thread_position_in_grid * CONTROL_POINTS_PER_THREAD < osdBuffers.kernelExecutionLimit;
-#else
-    const auto validThread = true;
-    if(thread_position_in_grid * CONTROL_POINTS_PER_THREAD >= osdBuffers.kernelExecutionLimit)
-        return;
-#endif
-
-    if(validThread)
+    //----------------------------------------------------------
+    // OSD Vertex Transform
+    //----------------------------------------------------------
     {
-        patchParam[subthreadgroup_in_threadgroup] = OsdGetPatchParam(real_threadgroup, osdBuffers.patchParamBuffer);
-        
-        for(unsigned threadOffset = 0; threadOffset < CONTROL_POINTS_PER_THREAD; threadOffset++)
-        {
-            const auto vertexId = osdBuffers.indexBuffer[(thread_position_in_grid * CONTROL_POINTS_PER_THREAD + threadOffset) * IndexLookupStride];
-            const auto v = osdBuffers.vertexBuffer[vertexId];
+        patchParam[primitiveIDInTG] = OsdGetPatchParam(primitiveID, osdBuffers.patchParamBuffer);
 
-            threadgroup auto& patchVertex = patchVertices[thread_position_in_threadgroup * CONTROL_POINTS_PER_THREAD + threadOffset];
-            OsdComputePerVertex(float4(v.position,1), patchVertex, vertexId, frameConsts.ModelViewProjectionMatrix, osdBuffers);
-            //User per vertex goes here, modifying 'patchVertex'
+        for (unsigned threadOffset = 0; threadOffset < CONTROL_POINTS_PER_THREAD; ++threadOffset)
+        {
+            if (vertexIndexInTG + threadOffset < PATCHES_PER_THREADGROUP * CONTROL_POINTS_PER_PATCH)
+            {
+                const auto vertexId = osdBuffers.indexBuffer[(vertexIndex + threadOffset)];
+                const auto v = osdBuffers.vertexBuffer[vertexId];
+
+                threadgroup auto& patchVertex = patchVertices[vertexIndexInTG + threadOffset];
+
+                //----------------------------------------------------------
+                // User Vertex Transform
+                //----------------------------------------------------------
+
+                OsdComputePerVertex(float4(v.position,1), patchVertex, vertexId, frameConsts.ModelViewProjectionMatrix, osdBuffers);
+            }
         }
     }
 
@@ -349,27 +356,31 @@ kernel void compute_main(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 #endif
 
-    if(validThread)
+    //----------------------------------------------------------
+    // OSD Patch Cull
+    //----------------------------------------------------------
     {
-#if PATCHES_PER_THREADGROUP > 1
-        auto patch = patchVertices + subthreadgroup_in_threadgroup * CONTROL_POINTS_PER_THREAD * CONTROL_POINTS_PER_PATCH;
-#else
-        //Small optimization for the '1 patch per threadgroup' case
-        auto patch = patchVertices;
-#endif
+        auto patch = patchVertices + primitiveIDInTG * CONTROL_POINTS_PER_PATCH;
 
-        if(!OsdCullPerPatchVertex(patch, frameConsts.ModelViewMatrix))
+        if (!OsdCullPerPatchVertex(patch, frameConsts.ModelViewMatrix))
         {
 #if !OSD_USE_PATCH_INDEX_BUFFER
-            quadTessellationFactors[real_threadgroup].edgeTessellationFactor[0] = 0.0h;
-            quadTessellationFactors[real_threadgroup].edgeTessellationFactor[1] = 0.0h;
-            quadTessellationFactors[real_threadgroup].edgeTessellationFactor[2] = 0.0h;
-            quadTessellationFactors[real_threadgroup].edgeTessellationFactor[3] = 0.0h;
-            quadTessellationFactors[real_threadgroup].insideTessellationFactor[0] = 0.0h;
-            quadTessellationFactors[real_threadgroup].insideTessellationFactor[1] = 0.0h;
+#if OSD_PATCH_REGULAR || OSD_PATCH_GREGORY_BASIS || OSD_PATCH_GREGORY || OSD_PATCH_GREGORY_BOUNDARY
+            patchTessellationFactors[primitiveID].edgeTessellationFactor[0] = 0.0h;
+            patchTessellationFactors[primitiveID].edgeTessellationFactor[1] = 0.0h;
+            patchTessellationFactors[primitiveID].edgeTessellationFactor[2] = 0.0h;
+            patchTessellationFactors[primitiveID].edgeTessellationFactor[3] = 0.0h;
+            patchTessellationFactors[primitiveID].insideTessellationFactor[0] = 0.0h;
+            patchTessellationFactors[primitiveID].insideTessellationFactor[1] = 0.0h;
+#elif OSD_PATCH_BOX_SPLINE_TRIANGLE || OSD_PATCH_GREGORY_TRIANGLE
+            patchTessellationFactors[primitiveID].edgeTessellationFactor[0] = 0.0h;
+            patchTessellationFactors[primitiveID].edgeTessellationFactor[1] = 0.0h;
+            patchTessellationFactors[primitiveID].edgeTessellationFactor[2] = 0.0h;
+            patchTessellationFactors[primitiveID].insideTessellationFactor = 0.0h;
+#endif
 #endif
 
-            patchParam[subthreadgroup_in_threadgroup].z = -1;
+            patchParam[primitiveIDInTG].z = -1;
 #if !NEEDS_BARRIER
             return;
 #endif
@@ -380,18 +391,24 @@ kernel void compute_main(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 #endif
 
-    if(validThread && patchParam[subthreadgroup_in_threadgroup].z != -1)
+    //----------------------------------------------------------
+    // OSD Patch Compute
+    //----------------------------------------------------------
+    if (patchParam[primitiveIDInTG].z != -1)
     {
-        for(unsigned threadOffset = 0; threadOffset < CONTROL_POINTS_PER_THREAD; threadOffset++)
+        for (unsigned threadOffset = 0; threadOffset < VERTEX_CONTROL_POINTS_PER_THREAD; ++threadOffset)
         {
-            OsdComputePerPatchVertex(
-                patchParam[subthreadgroup_in_threadgroup],
-                real_thread_in_threadgroup * CONTROL_POINTS_PER_THREAD + threadOffset,
-                real_threadgroup,
-                thread_position_in_grid * CONTROL_POINTS_PER_THREAD + threadOffset,
-                patchVertices + subthreadgroup_in_threadgroup * CONTROL_POINTS_PER_PATCH,
-                osdBuffers
-                );
+            if (invocationID + threadOffset < VERTEX_CONTROL_POINTS_PER_PATCH)
+            {
+                OsdComputePerPatchVertex(
+                    patchParam[primitiveIDInTG],
+                    invocationID + threadOffset,
+                    primitiveID,
+                    invocationID + threadOffset + primitiveID * VERTEX_CONTROL_POINTS_PER_PATCH,
+                    patchVertices + primitiveIDInTG * CONTROL_POINTS_PER_PATCH,
+                    osdBuffers
+                    );
+            }
         }
     }
 
@@ -399,26 +416,29 @@ kernel void compute_main(
     threadgroup_barrier(mem_flags::mem_device_and_threadgroup);
 #endif
 
-    if(validThread && real_thread_in_threadgroup == 0)
+    //----------------------------------------------------------
+    // OSD Tessellation Factors
+    //----------------------------------------------------------
+    if (invocationID == 0)
     {
 
 #if OSD_USE_PATCH_INDEX_BUFFER
         const auto patchId = atomic_fetch_add_explicit((device atomic_uint*)&drawIndirectCommands->patchCount, 1, memory_order_relaxed);
-        patchIndex[patchId] = real_threadgroup;
+        patchIndex[patchId] = primitiveID;
 #else
-        const auto patchId = real_threadgroup;
+        const auto patchId = primitiveID;
 #endif
 
         OsdComputePerPatchFactors(
-            patchParam[subthreadgroup_in_threadgroup],
+            patchParam[primitiveIDInTG],
             frameConsts.TessLevel,
-            real_threadgroup,
+            primitiveID,
             frameConsts.ProjectionMatrix,
             frameConsts.ModelViewMatrix,
             osdBuffers,
-            patchVertices + subthreadgroup_in_threadgroup * CONTROL_POINTS_PER_PATCH,
-            quadTessellationFactors[patchId]
-        );
+            patchVertices + primitiveIDInTG * CONTROL_POINTS_PER_PATCH,
+            patchTessellationFactors[patchId]
+            );
     }
 }
 
@@ -440,20 +460,20 @@ vertex FragmentInput vertex_main(
     )
 {
     FragmentInput out;
-    
+
 #if USE_STAGE_IN
     int3 patchParam = patchInput.patchParam;
 #else
     int3 patchParam = patchInput.patchParamBuffer[patch_id];
 #endif
-    
+
     int refinementLevel = OsdGetPatchRefinementLevel(patchParam);
     float tessLevel = min(frameConsts.TessLevel, (float)OSD_MAX_TESS_LEVEL) /
         exp2((float)refinementLevel - 1);
-    
+
     auto patchVertex = OsdComputePatch(tessLevel, position_in_patch, patch_id, patchInput);
 
-   
+
 #if USE_DISPLACEMENT
     float3 position = displacement(patchVertex.position,
                                    patchVertex.normal,
@@ -468,7 +488,7 @@ vertex FragmentInput vertex_main(
     float3 position = patchVertex.position;
 #endif
 
-    
+
     out.positionOut = mul(frameConsts.ModelViewProjectionMatrix, float4(position, 1));
     out.position = mul(frameConsts.ModelViewMatrix, float4(position,1)).xyz;
     out.normal = mul(frameConsts.ModelViewMatrix,float4(patchVertex.normal, 0)).xyz;
@@ -500,29 +520,29 @@ struct LightSource {
     float4 diffuse;
     float4 specular;
 };
-     
+
 float4
 lighting(float4 texColor, float3 Peye, float3 Neye, float occ, const constant LightSource (&lightSource)[NUM_LIGHTS])
 {
     float4 color = float4(0.0, 0.0, 0.0, 0.0);
     float3 n = Neye;
-    
+
     for (int i = 0; i < NUM_LIGHTS; ++i) {
-        
+
         float4 Plight = lightSource[i].position;
         float3 l = (Plight.w == 0.0)
         ? normalize(Plight.xyz) : normalize(Plight.xyz - Peye);
-        
+
         float3 h = normalize(l + float3(0,0,1));    // directional viewer
-        
+
         float d = max(0.0, dot(n, l));
         float s = pow(max(0.0, dot(n, h)), 64.0f);
-        
+
         color += (1.0 - occ) * ((lightSource[i].ambient +
                                  d * lightSource[i].diffuse) * texColor +
                                 s * lightSource[i].specular);
     }
-    
+
     color.a = 1.0;
     return color;
 }
@@ -546,11 +566,11 @@ edgeColor(float4 Cfill, float4 edgeDistance)
 #endif
     float4 Cedge = float4(1.0, 1.0, 0.0, 1.0);
     float p = exp2(-2 * d * d);
-    
+
 #if defined(GEOMETRY_OUT_WIRE)
     if (p < 0.25) discard;
 #endif
-    
+
     Cfill.rgb = lerp(Cfill.rgb, Cedge.rgb, p);
 #endif
     return Cfill;
@@ -599,43 +619,43 @@ fragment float4 fragment_main(
         ,const constant float4& shade [[buffer(2)]]
         )
 {
-	const auto displacementScale = config.displacementScale;
-	const auto mipmapBias = config.mipmapBias;
+    const auto displacementScale = config.displacementScale;
+    const auto mipmapBias = config.mipmapBias;
     float4 outColor;
     // ------------ normal ---------------
 #if NORMAL_HW_SCREENSPACE || NORMAL_SCREENSPACE
     float3 normal = perturbNormalFromDisplacement(input.position.xyz,
                                                   input.normal,
                                                   input.patchCoord,
-                                                  config.mipmapBias,
+                                                  mipmapBias,
                                                   textureDisplace_Data,
                                                   textureDisplace_Packing,
-                                                  config.displacementScale);
+                                                  displacementScale);
 #elif NORMAL_BIQUADRATIC || NORMAL_BIQUADRATIC_WG
     float4 du, dv;
     float4 disp = PtexMipmapLookupQuadratic(du, dv, input.patchCoord,
-                                            config.mipmapBias,
+                                            mipmapBias,
                                             textureDisplace_Data,
                                             textureDisplace_Packing);
-    
+
     disp *= displacementScale;
     du *= displacementScale;
     dv *= displacementScale;
-    
+
     float3 n = normalize(cross(input.tangent, input.bitangent));
     float3 tangent = input.tangent + n * du.x;
     float3 bitangent = input.bitangent + n * dv.x;
-    
+
 #if NORMAL_BIQUADRATIC_WG
     tangent += input.Nu * disp.x;
     bitangent += input.Nv * disp.x;
 #endif
-    
+
     float3 normal = normalize(cross(tangent, bitangent));
 #else
     float3 normal = input.normal;
 #endif
-    
+
     // ------------ color ---------------
 #if COLOR_PTEX_NEAREST
     float4 texColor = PtexLookupNearest(input.patchCoord,
@@ -653,36 +673,36 @@ fragment float4 fragment_main(
     float4 texColor = PtexMipmapLookupQuadratic(input.patchCoord, mipmapBias,
                                                 textureImage_Data,
                                                 textureImage_Packing);
-#elif COLOR_PATCHTYPE                                              
+#elif COLOR_PATCHTYPE
     float4 texColor = lighting(float4(input.patchColor), input.position.xyz, normal, 0, lightSource);
-    outColor = texColor;
+    outColor = max(texColor, shade);
     return outColor;
 #elif COLOR_PATCHCOORD
     float4 texColor = lighting(input.patchCoord, input.position.xyz, normal, 0, lightSource);
-    outColor = texColor;
+    outColor = max(texColor, shade);
     return outColor;
 #elif COLOR_NORMAL
     float4 texColor = float4(normal.x, normal.y, normal.z, 1);
-    outColor = texColor;
+    outColor = max(texColor, shade);
     return outColor;
 #else // COLOR_NONE
     float4 texColor = float4(0.5, 0.5, 0.5, 1);
 #endif
-    
+
     // ------------ occlusion ---------------
-    
+
 #if USE_PTEX_OCCLUSION
-    float occ = PtexMipmapLookup(input.patchCoord, config.mipmapBias,
+    float occ = PtexMipmapLookup(input.patchCoord, mipmapBias,
                                  textureOcclusion_Data,
                                  textureOcclusion_Packing).x;
 #else
     float occ = 0.0;
 #endif
-    
+
     // ------------ specular ---------------
-    
+
 #if USE_PTEX_SPECULAR
-    float specular = PtexMipmapLookup(input.patchCoord, config.mipmapBias,
+    float specular = PtexMipmapLookup(input.patchCoord, mipmapBias,
                                       textureSpecular_Data,
                                       textureSpecular_Packing).x;
 #else
@@ -690,7 +710,7 @@ fragment float4 fragment_main(
 #endif
     // ------------ lighting ---------------
     float4 Cf = lighting(texColor, input.position.xyz, normal, occ, lightSource);
-    
+
     // ------------ wireframe ---------------
     outColor = max(Cf, shade);
     return outColor;

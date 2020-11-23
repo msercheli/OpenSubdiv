@@ -22,16 +22,19 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
+#include "glLoader.h"
+
 #include "../osd/glComputeEvaluator.h"
 #include "../osd/glslPatchShaderSource.h"
+
+#include "../far/error.h"
+#include "../far/stencilTable.h"
 
 #include <cassert>
 #include <sstream>
 #include <string>
 #include <vector>
 
-#include "../far/error.h"
-#include "../far/stencilTable.h"
 
 namespace OpenSubdiv {
 namespace OPENSUBDIV_VERSION {
@@ -49,18 +52,18 @@ createSSBO(std::vector<T> const & src) {
     }
 
     GLuint devicePtr = 0;
-    glGenBuffers(1, &devicePtr);
 
-#if defined(GL_EXT_direct_state_access)
-    if (glNamedBufferDataEXT) {
-        glNamedBufferDataEXT(devicePtr, src.size()*sizeof(T),
-                             &src.at(0), GL_STATIC_DRAW);
-    } else {
-#else
-    {
+#if defined(GL_ARB_direct_state_access)
+    if (OSD_OPENGL_HAS(ARB_direct_state_access)) {
+        glCreateBuffers(1, &devicePtr);
+        glNamedBufferData(devicePtr, src.size()*sizeof(T),
+                          &src.at(0), GL_STATIC_DRAW);
+    } else
 #endif
+    {
         GLint prev = 0;
         glGetIntegerv(GL_SHADER_STORAGE_BUFFER_BINDING, &prev);
+        glGenBuffers(1, &devicePtr);
         glBindBuffer(GL_SHADER_STORAGE_BUFFER, devicePtr);
         glBufferData(GL_SHADER_STORAGE_BUFFER, src.size()*sizeof(T),
                      &src.at(0), GL_STATIC_DRAW);
@@ -122,12 +125,20 @@ GLStencilTableSSBO::~GLStencilTableSSBO() {
 // ---------------------------------------------------------------------------
 
 
-GLComputeEvaluator::GLComputeEvaluator() : _workGroupSize(64) {
+GLComputeEvaluator::GLComputeEvaluator()
+    : _workGroupSize(64),
+      _patchArraysSSBO(0) {
     memset (&_stencilKernel, 0, sizeof(_stencilKernel));
     memset (&_patchKernel, 0, sizeof(_patchKernel));
+
+    // Initialize internal OpenGL loader library if necessary
+    OpenSubdiv::internal::GLLoader::libraryInitializeGL();
 }
 
 GLComputeEvaluator::~GLComputeEvaluator() {
+    if (_patchArraysSSBO) {
+        glDeleteBuffers(1, &_patchArraysSSBO);
+    }
 }
 
 static GLuint
@@ -220,6 +231,11 @@ GLComputeEvaluator::Compile(BufferDescriptor const &srcDesc,
                               duuDesc, duvDesc, dvvDesc,
                               _workGroupSize)) {
         return false;
+    }
+
+    // create a patch arrays buffer
+    if (!_patchArraysSSBO) {
+        glGenBuffers(1, &_patchArraysSSBO);
     }
 
     return true;
@@ -398,16 +414,24 @@ GLComputeEvaluator::EvalPatches(
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 10, duuBuffer);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 11, duvBuffer);
     glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 12, dvvBuffer);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, patchCoordsBuffer);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, patchIndexBuffer);
-    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, patchParamsBuffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 5, patchCoordsBuffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 6, patchIndexBuffer);
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 7, patchParamsBuffer);
 
     glUseProgram(_patchKernel.program);
 
     glUniform1i(_patchKernel.uniformSrcOffset, srcDesc.offset);
     glUniform1i(_patchKernel.uniformDstOffset, dstDesc.offset);
-    glUniform4iv(_patchKernel.uniformPatchArray, (int)patchArrays.size(),
-                 (const GLint*)&patchArrays[0]);
+
+    int patchArraySize = sizeof(PatchArray);
+    glBindBuffer(GL_SHADER_STORAGE_BUFFER, _patchArraysSSBO);
+    glBufferData(GL_SHADER_STORAGE_BUFFER,
+        patchArrays.size()*patchArraySize, NULL, GL_STATIC_DRAW);
+    for (int i=0; i<(int)patchArrays.size(); ++i) {
+        glBufferSubData(GL_SHADER_STORAGE_BUFFER,
+            i*patchArraySize, sizeof(PatchArray), &patchArrays[i]);
+    }
+    glBindBufferBase(GL_SHADER_STORAGE_BUFFER, 4, _patchArraysSSBO);
 
     if (_patchKernel.uniformDuDesc > 0) {
         glUniform3i(_patchKernel.uniformDuDesc,

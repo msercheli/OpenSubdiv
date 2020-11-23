@@ -81,17 +81,18 @@ list(APPEND PLATFORM_LIBRARIES
     "${PTEX_LIBRARY}"
 )
 
-_stringify("mtlPtexViewer.metal" INC_FILES)
+osd_stringify("mtlPtexViewer.metal" INC_FILES)
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
-_add_executable(mtlPtexViewer "examples/mtlPtexViewer"
+osd_add_executable(mtlPtexViewer "examples/mtlPtexViewer"
     MACOSX_BUNDLE
     "${PLATFORM_FILES}"
     "${INC_FILES}"
     "${BUNDLE_FILES}"
     $<TARGET_OBJECTS:regression_common_obj>
     $<TARGET_OBJECTS:regression_far_utils_obj>
-    $<TARGET_OBJECTS:examples_common_obj>
+    $<TARGET_OBJECTS:examples_common_mtl_obj>
+    $<TARGET_OBJECTS:examples_common_ptex_obj>
 )
 
 

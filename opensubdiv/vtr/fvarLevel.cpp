@@ -552,6 +552,12 @@ FVarLevel::completeTopologyFromFaceValues(int regularBoundaryValence) {
                                    : (isInfSharp ? (vSpan._size > 1) : valueTag._xordinary);
 
             if (!isInfSharp) {
+                //
+                //  Remember that a semi-sharp value (or one dependent on one) needs to be
+                //  treated as a corner (at least three sharp edges or one sharp vertex)
+                //  until the sharpness has decayed, so don't tag them as creases here.
+                //  But do initialize and maintain the ends of the crease until needed.
+                //
                 if (vSpan._semiSharpEdgeCount || vTag._semiSharp) {
                     valueTag._semiSharp = true;
                 } else if (hasDependentValuesToSharpen) {
@@ -1044,20 +1050,17 @@ FVarLevel::getFaceCompositeValueTag(Index faceIndex) const {
 
     typedef ValueTag::ValueTagSize ValueTagSize;
 
-    ValueTag       compTag;
-    ValueTagSize & compInt = *(reinterpret_cast<ValueTagSize *>(&compTag));
-
-    compInt = 0;
+    ValueTagSize compInt = 0;
     for (int i = 0; i < faceValues.size(); ++i) {
         Index srcValueIndex = findVertexValueIndex(faceVerts[i], faceValues[i]);
         assert(_vertValueIndices[srcValueIndex] == faceValues[i]);
 
-        ValueTag const &     srcTag = _vertValueTags[srcValueIndex];
-        ValueTagSize const & srcInt = *(reinterpret_cast<ValueTagSize const *>(&srcTag));
+        ValueTag const &   srcTag = _vertValueTags[srcValueIndex];
+        ValueTagSize const srcInt = srcTag.getBits();
 
         compInt |= srcInt;
     }
-    return compTag;
+    return ValueTag(compInt);
 }
 
 } // end namespace internal

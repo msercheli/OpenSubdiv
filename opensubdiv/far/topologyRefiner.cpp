@@ -46,6 +46,8 @@ TopologyRefiner::TopologyRefiner(Sdc::SchemeType schemeType, Sdc::Options scheme
     _subdivOptions(schemeOptions),
     _isUniform(true),
     _hasHoles(false),
+    _hasIrregFaces(false),
+    _regFaceSize(Sdc::SchemeTypeTraits::GetRegularFaceSize(schemeType)),
     _maxLevel(0),
     _uniformOptions(0),
     _adaptiveOptions(0),
@@ -53,7 +55,8 @@ TopologyRefiner::TopologyRefiner(Sdc::SchemeType schemeType, Sdc::Options scheme
     _totalEdges(0),
     _totalFaces(0),
     _totalFaceVertices(0),
-    _maxValence(0) {
+    _maxValence(0),
+    _baseLevelOwned(true) {
 
     //  Need to revisit allocation scheme here -- want to use smart-ptrs for these
     //  but will probably have to settle for explicit new/delete...
@@ -63,10 +66,37 @@ TopologyRefiner::TopologyRefiner(Sdc::SchemeType schemeType, Sdc::Options scheme
     assembleFarLevels();
 }
 
+//
+//  The copy constructor is protected and used by the factory to create a new instance
+//  from only the base level of the given instance -- it does not create a full copy.
+//  So members reflecting any refinement are default-initialized while those dependent
+//  on the base level are copied or explicitly initialized after its assignment.
+//
+TopologyRefiner::TopologyRefiner(TopologyRefiner const & source) :
+    _subdivType(source._subdivType),
+    _subdivOptions(source._subdivOptions),
+    _isUniform(true),
+    _hasHoles(source._hasHoles),
+    _hasIrregFaces(source._hasIrregFaces),
+    _regFaceSize(source._regFaceSize),
+    _maxLevel(0),
+    _uniformOptions(0),
+    _adaptiveOptions(0),
+    _baseLevelOwned(false) {
+
+    _levels.reserve(10);
+    _levels.push_back(source._levels[0]);
+    initializeInventory();
+
+    _farLevels.reserve(10);
+    assembleFarLevels();
+}
+
+
 TopologyRefiner::~TopologyRefiner() {
 
     for (int i=0; i<(int)_levels.size(); ++i) {
-        delete _levels[i];
+        if ((i > 0) || _baseLevelOwned) delete _levels[i];
     }
 
     for (int i=0; i<(int)_refinements.size(); ++i) {
@@ -263,13 +293,16 @@ namespace internal {
         bool IsEmpty() const { return *((int_type*)this) == 0; }
 
         FeatureMask() { Clear(); }
-        FeatureMask(Options const & options, Sdc::SchemeType sType) { InitializeFeatures(options, sType); }
+        FeatureMask(Options const & options, int regFaceSize) {
+            Clear();
+            InitializeFeatures(options, regFaceSize);
+        }
 
         //  These are the two primary methods intended for use -- intialization via a set of Options
         //  and reduction of the subsequent feature set (which presumes prior initialization with the
         //  same set as give)
         //
-        void InitializeFeatures(Options const & options, Sdc::SchemeType sType);
+        void InitializeFeatures(Options const & options, int regFaceSize);
         void ReduceFeatures(    Options const & options);
 
     public:
@@ -285,12 +318,14 @@ namespace internal {
         int_type selectInfSharpIrregularCrease : 1;
         int_type selectInfSharpIrregularCorner : 1;
 
+        int_type selectUnisolatedInteriorEdge : 1;
+
         int_type selectNonManifold  : 1;
         int_type selectFVarFeatures : 1;
     };
 
     void
-    FeatureMask::InitializeFeatures(Options const & options, Sdc::SchemeType subdType) {
+    FeatureMask::InitializeFeatures(Options const & options, int regFaceSize) {
 
         //
         //  Support for the "single-crease patch" case is limited to the subdivision scheme
@@ -305,8 +340,7 @@ namespace internal {
         //  when regular inf-sharp features are all selected, it can also be used for the
         //  single-crease case.
         //
-        bool useSingleCreasePatch = options.useSingleCreasePatch &&
-                                    (Sdc::SchemeTypeTraits::GetRegularFaceSize(subdType) == 4);
+        bool useSingleCreasePatch = options.useSingleCreasePatch && (regFaceSize == 4);
 
         //  Extra-ordinary features (independent of the inf-sharp options):
         selectXOrdinaryInterior = true;
@@ -322,6 +356,8 @@ namespace internal {
         selectInfSharpIrregularDart   = true;
         selectInfSharpIrregularCrease = true;
         selectInfSharpIrregularCorner = true;
+
+        selectUnisolatedInteriorEdge = useSingleCreasePatch && !options.useInfSharpPatch;
 
         selectNonManifold  = true;
         selectFVarFeatures = options.considerFVarChannels;
@@ -345,7 +381,8 @@ namespace internal {
 } // end namespace internal
 
 void
-TopologyRefiner::RefineAdaptive(AdaptiveOptions options) {
+TopologyRefiner::RefineAdaptive(AdaptiveOptions options,
+                                ConstIndexArray baseFacesToRefine) {
 
     if (_levels[0]->getNumVertices() == 0) {
         Error(FAR_RUNTIME_ERROR,
@@ -355,11 +392,6 @@ TopologyRefiner::RefineAdaptive(AdaptiveOptions options) {
     if (_refinements.size()) {
         Error(FAR_RUNTIME_ERROR,
             "Failure in TopologyRefiner::RefineAdaptive() -- previous refinements already applied.");
-        return;
-    }
-    if (_subdivType != Sdc::SCHEME_CATMARK) {
-        Error(FAR_RUNTIME_ERROR,
-            "Failure in TopologyRefiner::RefineAdaptive() -- currently only supported for Catmark scheme.");
         return;
     }
 
@@ -374,12 +406,14 @@ TopologyRefiner::RefineAdaptive(AdaptiveOptions options) {
     //  of levels isolating different sets of features, initialize the two feature sets
     //  up front and use the appropriate one for each level:
     //
+    int nonLinearScheme = Sdc::SchemeTypeTraits::GetLocalNeighborhoodSize(_subdivType);
+
     int shallowLevel = std::min<int>(options.secondaryLevel, options.isolationLevel);
     int deeperLevel  = options.isolationLevel;
 
-    int potentialMaxLevel = deeperLevel;
+    int potentialMaxLevel = nonLinearScheme ? deeperLevel : _hasIrregFaces;
 
-    internal::FeatureMask moreFeaturesMask(options, _subdivType);
+    internal::FeatureMask moreFeaturesMask(options, _regFaceSize);
     internal::FeatureMask lessFeaturesMask = moreFeaturesMask;
 
     if (shallowLevel < potentialMaxLevel) {
@@ -387,15 +421,10 @@ TopologyRefiner::RefineAdaptive(AdaptiveOptions options) {
     }
 
     //
-    //  Features are not relevant to schemes whose influence does not extend beyond the
-    //  face -- only irregular faces matter in such cases so clear all other features.
     //  If face-varying channels are considered, make sure non-linear channels are present
     //  and turn off consideration if none present:
     //
-    if (Sdc::SchemeTypeTraits::GetLocalNeighborhoodSize(_subdivType) == 0) {
-        moreFeaturesMask.Clear();
-        lessFeaturesMask.Clear();
-    } else if (moreFeaturesMask.selectFVarFeatures) {
+    if (moreFeaturesMask.selectFVarFeatures && nonLinearScheme) {
         bool nonLinearChannelsPresent = false;
         for (int channel = 0; channel < _levels[0]->getNumFVarChannels(); ++channel) {
             nonLinearChannelsPresent |= !_levels[0]->getFVarLevel(channel).isLinear();
@@ -436,7 +465,17 @@ TopologyRefiner::RefineAdaptive(AdaptiveOptions options) {
         //
         Vtr::internal::SparseSelector selector(*refinement);
 
-        selectFeatureAdaptiveComponents(selector, (i <= shallowLevel) ? moreFeaturesMask : lessFeaturesMask);
+        internal::FeatureMask const & levelFeatures = (i <= shallowLevel) ? moreFeaturesMask
+                                                                          : lessFeaturesMask;
+
+        if (i > 1) {
+            selectFeatureAdaptiveComponents(selector, levelFeatures, ConstIndexArray());
+        } else if (nonLinearScheme) {
+            selectFeatureAdaptiveComponents(selector, levelFeatures, baseFacesToRefine);
+        } else {
+            selectLinearIrregularFaces(selector, baseFacesToRefine);
+        }
+
         if (selector.isSelectionEmpty()) {
             delete refinement;
             delete &childLevel;
@@ -458,28 +497,35 @@ TopologyRefiner::RefineAdaptive(AdaptiveOptions options) {
 //
 namespace {
     //
-    //  First is a low-level utility method to perform the same analysis on a set of
-    //  VTags for a face given a FeatureMask.  This is shared between the analysis of
-    //  the main face and face-varying channels.
+    //  First are a couple of low-level utility methods to perform the same analysis
+    //  at a corner or the entire face for specific detection of inf-sharp or boundary
+    //  features.  These are shared between the analysis of the main face and those in
+    //  face-varying channels (which only differ from the main face in the presence of
+    //  face-varying boundaries).
     //
-    //  If any inf-sharp features are to be selected, identify them first as irregular
-    //  or not, then qualify them more spe
+    //  The first can be applied equally to an individual corner or to the entire face
+    //  (using its composite tag).  The second applies to the entire face, making use
+    //  of the first, and is the main entry point for dealng with inf-sharp features.
     //
     //  Note we can use the composite tag here even though it arises from all corners
-    //  of the face and so does not represent a specific corner.  We are guaranteed at
-    //  least one smooth interior vertex, which limits the combinations that can exist
-    //  on the remaining corners.
+    //  of the face and so does not represent a specific corner.  When at least one
+    //  smooth interior vertex exists, it limits the combinations that can exist on the
+    //  remaining corners (though quads and tris cannot be treated equally here).
     //
-    //  Strictly speaking we should be testing all features and not returning based on
-    //  the selection status of the most likely feature that warrants selection, but in
-    //  practice, the separation of features and the typically common settings to groups
-    //  of features (i.e. it not yet possible, or even desireable, to select irregular
-    //  creases deeper than irregular corners) makes that unnecessary.
+    //  If any inf-sharp features are to be selected, identify them first as irregular
+    //  or not, then qualify them more specifically.  (Remember that a regular vertex
+    //  may have its neighboring faces partitioned into irregular regions in the
+    //  presence of inf-sharp edges.  Similarly an irregular vertex may have its
+    //  neighborhood partitioned into regular regions.)
     //
     inline bool
-    doesInfSharpFaceHaveFeatures(Vtr::internal::Level::VTag compVTag,
+    doesInfSharpVTagHaveFeatures(Vtr::internal::Level::VTag compVTag,
                                  internal::FeatureMask const & featureMask) {
 
+        //  Note that even though the given VTag may represent an individual corner, we
+        //  use more general bitwise tests here (particularly the Rule) so that we can
+        //  pass in a composite tag for the entire face and have the same tests applied:
+        //
         if (compVTag._infIrregular) {
             if (compVTag._rule & Sdc::Crease::RULE_CORNER) {
                 return featureMask.selectInfSharpIrregularCorner;
@@ -503,6 +549,50 @@ namespace {
                 return featureMask.selectInfSharpRegularCorner;
             } else {
                 return featureMask.selectInfSharpRegularCrease;
+            }
+        }
+        return false;
+    }
+
+    inline bool
+    doesInfSharpFaceHaveFeatures(Vtr::internal::Level::VTag compVTag,
+                                 Vtr::internal::Level::VTag vTags[], int numVerts,
+                                 internal::FeatureMask const & featureMask) {
+        //
+        //  For quads, if at least one smooth corner of a regular face, features
+        //  are isolated enough to make use of the composite tag alone (unless
+        //  boundary isolation is enabled, in which case trivially return).
+        //
+        //  For tris, the presence of boundaries creates more ambiguity, so we
+        //  need to exclude that case and inspect corner features individually.
+        //
+        bool isolateQuadBoundaries = false;
+
+        bool atLeastOneSmoothCorner = (compVTag._rule & Sdc::Crease::RULE_SMOOTH);
+        if (numVerts == 4) {
+            if (atLeastOneSmoothCorner) {
+                return doesInfSharpVTagHaveFeatures(compVTag, featureMask);
+            } else if (isolateQuadBoundaries) {
+                return true;
+            } else if (featureMask.selectUnisolatedInteriorEdge) {
+                //  Needed for single-crease approximation to inf-sharp interior edge:
+                for (int i = 0; i < 4; ++i) {
+                    if (vTags[i]._infSharpEdges && !vTags[i]._boundary) {
+                        return true;
+                    }
+                }
+            }
+        } else {
+            if (atLeastOneSmoothCorner && !compVTag._boundary) {
+                return doesInfSharpVTagHaveFeatures(compVTag, featureMask);
+            }
+        }
+
+        for (int i = 0; i < numVerts; ++i) {
+            if (!(vTags[i]._rule & Sdc::Crease::RULE_SMOOTH)) {
+                if (doesInfSharpVTagHaveFeatures(vTags[i], featureMask)) {
+                    return true;
+                }
             }
         }
         return false;
@@ -536,20 +626,28 @@ namespace {
     //
     bool
     doesFaceHaveFeatures(Vtr::internal::Level const& level, Index face,
-                         internal::FeatureMask const & featureMask) {
-
-        if (featureMask.IsEmpty()) return false;
+                         internal::FeatureMask const & featureMask, int regFaceSize) {
 
         using Vtr::internal::Level;
 
         ConstIndexArray fVerts = level.getFaceVertices(face);
 
+        //  Irregular faces (base level) are unconditionally included:
+        if (fVerts.size() != regFaceSize) {
+            return true;
+        }
+
         //  Gather and combine the VTags:
         Level::VTag vTags[4];
         level.getFaceVTags(face, vTags);
 
-        //  Incomplete faces (incomplete neighborhood) are never candidates for inclusion:
         Level::VTag compFaceVTag = Level::VTag::BitwiseOr(vTags, fVerts.size());
+
+        //  Faces incident irregular faces (base level) are unconditionally included:
+        if (compFaceVTag._incidIrregFace) {
+            return true;
+        }
+        //  Incomplete faces (incomplete neighborhood) are unconditionally excluded:
         if (compFaceVTag._incomplete) {
             return false;
         }
@@ -577,11 +675,6 @@ namespace {
             return false;
         }
 
-        //  If no smooth corners, too many boundaries/sharp-features and need to isolate:
-        if (!(compFaceVTag._rule & Sdc::Crease::RULE_SMOOTH)) {
-            return true;
-        }
-
         //  Semi-sharp features -- select all immediately or test the single-crease case:
         if (compFaceVTag._semiSharp || compFaceVTag._semiSharpEdges) {
             if (featureMask.selectSemiSharpSingle && featureMask.selectSemiSharpNonSingle) {
@@ -593,9 +686,9 @@ namespace {
             }
         }
 
-        //  Inf-sharp features -- delegate to shared method:
+        //  Inf-sharp features (including boundaries) -- delegate to shared method:
         if (compFaceVTag._infSharp || compFaceVTag._infSharpEdges) {
-            return doesInfSharpFaceHaveFeatures(compFaceVTag, featureMask);
+            return doesInfSharpFaceHaveFeatures(compFaceVTag, vTags, fVerts.size(), featureMask);
         }
         return false;
     }
@@ -648,13 +741,8 @@ namespace {
             return true;
         }
 
-        //  If no smooth corners, too many boundaries/sharp-features and need to isolate:
-        if (!(compVTag._rule & Sdc::Crease::RULE_SMOOTH)) {
-            return true;
-        }
-
         //  Given faces with differing FVar topology are on boundaries, defer to inf-sharp:
-        return doesInfSharpFaceHaveFeatures(compVTag, featureMask);
+        return doesInfSharpFaceHaveFeatures(compVTag, vTags, fVerts.size(), featureMask);
     }
 
 } // end namespace
@@ -669,59 +757,29 @@ namespace {
 //
 void
 TopologyRefiner::selectFeatureAdaptiveComponents(Vtr::internal::SparseSelector& selector,
-                                                 internal::FeatureMask const & featureMask) {
-
-    Vtr::internal::Level const& level = selector.getRefinement().parent();
-    int levelDepth = level.getDepth();
-
-    bool selectIrregularFaces = (levelDepth == 0);
-    if (featureMask.IsEmpty() && !selectIrregularFaces) return;
-
-    int numFVarChannels = featureMask.selectFVarFeatures ? level.getNumFVarChannels() : 0;
-    int regularFaceSize = selector.getRefinement().getRegularFaceSize();
-    int neighborhood    = Sdc::SchemeTypeTraits::GetLocalNeighborhoodSize(_subdivType);
+                                                 internal::FeatureMask const & featureMask,
+                                                 ConstIndexArray facesToRefine) {
 
     //
     //  Inspect each face and the properties tagged at all of its corners:
     //
-    for (Vtr::Index face = 0; face < level.getNumFaces(); ++face) {
+    Vtr::internal::Level const& level = selector.getRefinement().parent();
 
-        if (level.isFaceHole(face)) {
-            continue;
-        }
+    int numFacesToRefine = facesToRefine.size() ? facesToRefine.size() : level.getNumFaces();
 
-        //
-        //  Testing irregular faces is only necessary at level 0, and potentially warrants
-        //  separating out as the caller can detect these.
-        //
-        //  We need to also ensure that all adjacent faces to this are selected, so we
-        //  select every face incident every vertex of the face.  This is the only place
-        //  where other faces are selected as a side effect and somewhat undermines the
-        //  whole intent of the per-face traversal.
-        //
-        if (selectIrregularFaces) {
-            Vtr::ConstIndexArray faceVerts = level.getFaceVertices(face);
+    int numFVarChannels = featureMask.selectFVarFeatures ? level.getNumFVarChannels() : 0;
 
-            if (faceVerts.size() != regularFaceSize) {
-                if (neighborhood == 0) {
-                    selector.selectFace(face);
-                } else {
-                    for (int i = 0; i < faceVerts.size(); ++i) {
-                        ConstIndexArray fVertFaces = level.getVertexFaces(faceVerts[i]);
-                        for (int j = 0; j < fVertFaces.size(); ++j) {
-                            selector.selectFace(fVertFaces[j]);
-                        }
-                    }
-                }
-                continue;
-            }
-        }
+    for (int fIndex = 0; fIndex < numFacesToRefine; ++fIndex) {
+
+        Vtr::Index face = facesToRefine.size() ? facesToRefine[fIndex] : (Index) fIndex;
+
+        if (HasHoles() && level.isFaceHole(face)) continue;
 
         //
         //  Test if the face has any of the specified features present.  If not, and FVar
         //  channels are to be considered, look for features in the FVar channels:
         //
-        bool selectFace = doesFaceHaveFeatures(level, face, featureMask);
+        bool selectFace = doesFaceHaveFeatures(level, face, featureMask, _regFaceSize);
 
         if (!selectFace && featureMask.selectFVarFeatures) {
             for (int channel = 0; !selectFace && (channel < numFVarChannels); ++channel) {
@@ -734,6 +792,29 @@ TopologyRefiner::selectFeatureAdaptiveComponents(Vtr::internal::SparseSelector& 
             }
         }
         if (selectFace) {
+            selector.selectFace(face);
+        }
+    }
+}
+
+void
+TopologyRefiner::selectLinearIrregularFaces(Vtr::internal::SparseSelector& selector,
+                                            ConstIndexArray facesToRefine) {
+
+    //
+    //  Inspect each face and select only irregular faces:
+    //
+    Vtr::internal::Level const& level = selector.getRefinement().parent();
+
+    int numFacesToRefine = facesToRefine.size() ? facesToRefine.size() : level.getNumFaces();
+
+    for (int fIndex = 0; fIndex < numFacesToRefine; ++fIndex) {
+
+        Vtr::Index face = facesToRefine.size() ? facesToRefine[fIndex] : (Index) fIndex;
+
+        if (HasHoles() && level.isFaceHole(face)) continue;
+
+        if (level.getFaceVertices(face).size() != _regFaceSize) {
             selector.selectFace(face);
         }
     }

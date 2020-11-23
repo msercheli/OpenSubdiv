@@ -22,32 +22,18 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#if defined(__APPLE__)
-    #if defined(OSD_USES_GLEW)
-        #include <GL/glew.h>
-    #else
-        #include <OpenGL/gl3.h>
-    #endif
-    #define GLFW_INCLUDE_GL3
-    #define GLFW_NO_GLU
-#else
-    #include <stdlib.h>
-    #include <GL/glew.h>
-    #if defined(WIN32)
-        #include <GL/wglew.h>
-    #endif
-#endif
+#include "glLoader.h"
 
 #include <GLFW/glfw3.h>
 GLFWwindow* g_window=0;
 GLFWmonitor* g_primary=0;
 
-#include <osd/cpuGLVertexBuffer.h>
+#include <opensubdiv/osd/cpuGLVertexBuffer.h>
 
-#include <far/patchTableFactory.h>
-#include <far/stencilTable.h>
-#include <far/stencilTableFactory.h>
-#include <far/primvarRefiner.h>
+#include <opensubdiv/far/patchTableFactory.h>
+#include <opensubdiv/far/stencilTable.h>
+#include <opensubdiv/far/stencilTableFactory.h>
+#include <opensubdiv/far/primvarRefiner.h>
 
 #include "../../regression/common/far_utils.h"
 #include "../common/stopwatch.h"
@@ -55,6 +41,7 @@ GLFWmonitor* g_primary=0;
 #include "../common/glUtils.h"
 #include "../common/glControlMeshDisplay.h"
 #include "../common/glHud.h"
+#include "../common/glUtils.h"
 
 #include "init_shapes.h"
 #include "gl_mesh.h"
@@ -812,7 +799,7 @@ createMeshes(ShapeDesc const & desc, int maxlevel) {
     }
     g_font->Clear();
 
-    Shape * shape = Shape::parseObj(desc.data.c_str(), desc.scheme);
+    Shape * shape = Shape::parseObj(desc);
 
     createFarGLMesh(shape, maxlevel);
     delete shape;
@@ -1396,22 +1383,8 @@ int main(int argc, char ** argv)
     glfwSetMouseButtonCallback(g_window, mouse);
     glfwSetWindowCloseCallback(g_window, windowClose);
 
+    GLUtils::InitializeGL();
     GLUtils::PrintGLVersion();
-
-#if defined(OSD_USES_GLEW)
-#ifdef CORE_PROFILE
-    // this is the only way to initialize glew correctly under core profile context.
-    glewExperimental = true;
-#endif
-    if (GLenum r = glewInit() != GLEW_OK) {
-        printf("Failed to initialize glew. Error = %s\n", glewGetErrorString(r));
-        exit(1);
-    }
-#ifdef CORE_PROFILE
-    // clear GL errors which were generated during glewInit()
-    glGetError();
-#endif
-#endif
 
     initGL();
 

@@ -22,21 +22,7 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#if defined(__APPLE__)
-    #if defined(OSD_USES_GLEW)
-        #include <GL/glew.h>
-    #else
-        #include <OpenGL/gl3.h>
-    #endif
-    #define GLFW_INCLUDE_GL3
-    #define GLFW_NO_GLU
-#else
-    #include <stdlib.h>
-    #include <GL/glew.h>
-    #if defined(WIN32)
-        #include <GL/wglew.h>
-    #endif
-#endif
+#include "glLoader.h"
 
 #include <GLFW/glfw3.h>
 GLFWwindow* g_window = 0;
@@ -49,60 +35,62 @@ GLFWmonitor* g_primary = 0;
 #include <string>
 #include <utility>
 #include <algorithm>
-#include <far/error.h>
+#include <opensubdiv/far/error.h>
 
-#include <osd/cpuEvaluator.h>
-#include <osd/cpuGLVertexBuffer.h>
+#include <opensubdiv/osd/cpuEvaluator.h>
+#include <opensubdiv/osd/cpuGLVertexBuffer.h>
 
 #ifdef OPENSUBDIV_HAS_OPENMP
-    #include <osd/ompEvaluator.h>
+    #include <opensubdiv/osd/ompEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_TBB
-    #include <osd/tbbEvaluator.h>
+    #include <opensubdiv/osd/tbbEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_OPENCL
-    #include <osd/clEvaluator.h>
-    #include <osd/clGLVertexBuffer.h>
+    #include <opensubdiv/osd/clEvaluator.h>
+    #include <opensubdiv/osd/clGLVertexBuffer.h>
     #include "../common/clDeviceContext.h"
     CLDeviceContext g_clDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_CUDA
-    #include <osd/cudaEvaluator.h>
-    #include <osd/cudaGLVertexBuffer.h>
+    #include <opensubdiv/osd/cudaEvaluator.h>
+    #include <opensubdiv/osd/cudaGLVertexBuffer.h>
     #include "../common/cudaDeviceContext.h"
     CudaDeviceContext g_cudaDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK
-    #include <osd/glXFBEvaluator.h>
-    #include <osd/glVertexBuffer.h>
+    #include <opensubdiv/osd/glXFBEvaluator.h>
+    #include <opensubdiv/osd/glVertexBuffer.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_GLSL_COMPUTE
-    #include <osd/glComputeEvaluator.h>
-    #include <osd/glVertexBuffer.h>
+    #include <opensubdiv/osd/glComputeEvaluator.h>
+    #include <opensubdiv/osd/glVertexBuffer.h>
 #endif
 
-#include <osd/glMesh.h>
+#include <opensubdiv/osd/glMesh.h>
 OpenSubdiv::Osd::GLMeshInterface *g_mesh;
 
 #include "Ptexture.h"
 #include "PtexUtils.h"
 
 #include "../../regression/common/far_utils.h"
+#include "../../regression/common/arg_utils.h"
+#include "../common/objAnim.h"
 #include "../common/stopwatch.h"
 #include "../common/simple_math.h"
 #include "../common/glControlMeshDisplay.h"
 #include "../common/glHud.h"
-#include "../common/glUtils.h"
 #include "../common/hdr_reader.h"
 #include "../common/glPtexMipmapTexture.h"
 #include "../common/glShaderCache.h"
+#include "../common/glUtils.h"
 
-#include <osd/glslPatchShaderSource.h>
+#include <opensubdiv/osd/glslPatchShaderSource.h>
 static const char *g_defaultShaderSource =
 #if defined(GL_ARB_tessellation_shader) || defined(GL_VERSION_4_0)
     #include "shader.gen.h"
@@ -180,7 +168,7 @@ int   g_fullscreen = 0,
       g_wire = DISPLAY_SHADED,
       g_drawNormals = 0,
       g_mbutton[3] = {0, 0, 0},
-      g_level = 1,
+      g_level = 2,
       g_tessLevel = 2,
       g_kernel = kCPU,
       g_scheme = 0,
@@ -195,7 +183,7 @@ float g_moveScale = 0.0f,
       g_displacementScale = 1.0f,
       g_mipmapBias = 0.0;
 
-bool  g_adaptive = false,
+bool  g_adaptive = true,
       g_yup = false,
       g_patchCull = true,
       g_screenSpaceTess = true,
@@ -244,7 +232,7 @@ float g_animTime = 0;
 std::vector<float> g_positions,
                    g_normals;
 
-std::vector<std::vector<float> > g_animPositions;
+ObjAnim const * g_objAnim = 0;
 
 GLuint g_queries[2] = {0, 0};
 GLuint g_vao = 0;
@@ -346,23 +334,13 @@ updateGeom() {
 
     int nverts = (int)g_positions.size() / 3;
 
-    if (g_moveScale && g_adaptive && !g_animPositions.empty()) {
-        // baked animation only works with adaptive for now
-        // (since non-adaptive requires normals)
-        int nkey = (int)g_animPositions.size();
-        const float fps = 24.0f;
-
-        float p = fmodf(g_animTime * fps, (float)nkey);
-        int key = (int)p;
-        float b = p - key;
+    if (g_moveScale && g_adaptive && g_objAnim) {
 
         std::vector<float> vertex;
-        vertex.reserve(nverts*3);
-        for (int i = 0; i < nverts*3; ++i) {
-            float p0 = g_animPositions[key][i];
-            float p1 = g_animPositions[(key+1)%nkey][i];
-            vertex.push_back(p0*(1-b) + p1*b);
-        }
+        vertex.resize(nverts*3);
+
+        g_objAnim->InterpolatePositions(g_animTime, &vertex[0], 3);
+
         g_mesh->UpdateVertexBuffer(&vertex[0], 0, nverts);
 
     } else {
@@ -441,6 +419,7 @@ createPTexGeo(PtexTexture * r) {
     Shape * shape = new Shape;
 
     shape->scheme = kCatmark;
+    assert(r->meshType() == Ptex::mt_quad);
 
     shape->verts.resize(nvp);
     for (int i=0; i<nvp; ++i) {
@@ -699,7 +678,6 @@ public:
         if (effectDesc.effect.ibl)
             ss << "#define USE_IBL\n";
 
-
         // need for patch color-coding : we need these defines in the fragment shader
         if (type == Far::PatchDescriptor::GREGORY) {
             ss << "#define OSD_PATCH_GREGORY\n";
@@ -707,6 +685,10 @@ public:
             ss << "#define OSD_PATCH_GREGORY_BOUNDARY\n";
         } else if (type == Far::PatchDescriptor::GREGORY_BASIS) {
             ss << "#define OSD_PATCH_GREGORY_BASIS\n";
+        } else if (type == Far::PatchDescriptor::LOOP) {
+            ss << "#define OSD_PATCH_LOOP\n";
+        } else if (type == Far::PatchDescriptor::GREGORY_TRIANGLE) {
+            ss << "#define OSD_PATCH_GREGORY_TRIANGLE\n";
         }
 
         // include osd PatchCommon
@@ -835,6 +817,10 @@ createPtex(const char *filename, int memLimit) {
         printf("Error in reading %s\n", filename);
         exit(1);
     }
+    if (ptex->meshType() == Ptex::mt_triangle) {
+        printf("Error in %s:  triangular Ptex not yet supported\n", filename);
+        exit(1);
+    }
 
     size_t targetMemory = memLimit * 1024 * 1024; // MB
 
@@ -872,6 +858,10 @@ createOsdMesh(int level, int kernel) {
         printf("Error in reading %s\n", g_ptexColorFilename);
         exit(1);
     }
+    if (ptexColor->meshType() == Ptex::mt_triangle) {
+        printf("Error in %s:  triangular Ptex not yet supported\n", g_ptexColorFilename);
+        exit(1);
+    }
 
     // generate Shape representation from ptex
     Shape * shape = createPTexGeo(ptexColor);
@@ -900,11 +890,8 @@ createOsdMesh(int level, int kernel) {
     delete g_mesh;
     g_mesh = NULL;
 
-    // Adaptive refinement currently supported only for catmull-clark scheme
-    bool doAdaptive = (g_adaptive != 0 && g_scheme == 0);
-
     OpenSubdiv::Osd::MeshBitset bits;
-    bits.set(OpenSubdiv::Osd::MeshAdaptive, doAdaptive);
+    bits.set(OpenSubdiv::Osd::MeshAdaptive, g_adaptive);
     bits.set(OpenSubdiv::Osd::MeshEndCapGregoryBasis, true);
 
     int numVertexElements = g_adaptive ? 3 : 6;
@@ -1103,8 +1090,9 @@ updateConstantUniformBlock() {
     translate(constantData.ModelViewMatrix, -g_pan[0], -g_pan[1], -g_dolly);
     rotate(constantData.ModelViewMatrix, g_rotate[1], 1, 0, 0);
     rotate(constantData.ModelViewMatrix, g_rotate[0], 0, 1, 0);
-    if (g_yup)
+    if (!g_yup) {
         rotate(constantData.ModelViewMatrix, -90, 1, 0, 0);
+    }
     translate(constantData.ModelViewMatrix, -g_center[0], -g_center[1], -g_center[2]);
     perspective(constantData.ProjectionMatrix, 45.0f, (float)aspect, g_size*0.001f,
                 g_size+g_dolly);
@@ -1423,7 +1411,7 @@ display() {
             g_hud.DrawString(10, -160, "Primitives      : %d", numPrimsGenerated);
         }
         g_hud.DrawString(10, -140, "Vertices        : %d", g_mesh->GetNumVertices());
-        g_hud.DrawString(10, -120, "Scheme          : %s", g_scheme == 0 ? "CATMARK" : "LOOP");
+        g_hud.DrawString(10, -120, "Scheme          : %s", g_scheme == 0 ? "CATMARK" : "BILINEAR");
         g_hud.DrawString(10, -100, "GPU Kernel      : %.3f ms", g_gpuTime);
         g_hud.DrawString(10, -80,  "CPU Kernel      : %.3f ms", g_cpuTime);
         g_hud.DrawString(10, -60,  "GPU Draw        : %.3f ms", drawGpuTime);
@@ -1694,7 +1682,7 @@ void usage(const char *program) {
     printf("          -d <diffseEnvMap.hdr>   : diffuse environment map for IBL\n");
     printf("          -e <specularEnvMap.hdr> : specular environment map for IBL\n");
     printf("          -s <shaderfile.glsl>    : custom shader file\n");
-    printf("          -y                      : Y-up model\n");
+    printf("          -yup                    : Y-up model\n");
     printf("          -m level                : max mipmap level (default=10)\n");
     printf("          -x <ptex limit MB>      : ptex target memory size\n");
     printf("          --disp <scale>          : Displacement scale\n");
@@ -1703,8 +1691,8 @@ void usage(const char *program) {
 //------------------------------------------------------------------------------
 static void
 callbackError(OpenSubdiv::Far::ErrorType err, const char *message) {
-    printf("Error: %d\n", err);
-    printf("%s", message);
+    printf("OpenSubdiv Error: %d\n", err);
+    printf("    %s\n", message);
 }
 
 //------------------------------------------------------------------------------
@@ -1716,51 +1704,53 @@ callbackErrorGLFW(int error, const char* description) {
 //------------------------------------------------------------------------------
 int main(int argc, char ** argv) {
 
-    std::vector<std::string> animobjs;
+    ArgOptions args;
+    args.Parse(argc, argv);
+
+    const std::vector<const char *> &animobjs = args.GetObjFiles();
+    bool fullscreen = args.GetFullScreen();
+
+    g_yup = args.GetYUp();
+    g_adaptive = args.GetAdaptive();
+    g_level = args.GetLevel();
+    g_repeatCount = args.GetRepeatCount();
+
+    //  Retrieve and parse remaining args:
+    const std::vector<const char *> &argvRem = args.GetRemainingArgs();
+
     const char *diffuseEnvironmentMap = NULL, *specularEnvironmentMap = NULL;
     const char *colorFilename = NULL, *displacementFilename = NULL,
         *occlusionFilename = NULL, *specularFilename = NULL;
     int memLimit = 0, colorMem = 0, displacementMem = 0,
         occlusionMem = 0, specularMem = 0;
-    bool fullscreen = false;
 
-    for (int i = 1; i < argc; ++i) {
-        if (strstr(argv[i], ".obj"))
-            animobjs.push_back(argv[i]);
-        else if (!strcmp(argv[i], "-l"))
-            g_level = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-c"))
-            g_repeatCount = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-d"))
-            diffuseEnvironmentMap = argv[++i];
-        else if (!strcmp(argv[i], "-e"))
-            specularEnvironmentMap = argv[++i];
-        else if (!strcmp(argv[i], "-s"))
-            g_shaderFilename = argv[++i];
-        else if (!strcmp(argv[i], "-f"))
-            fullscreen = true;
-        else if (!strcmp(argv[i], "-y"))
-            g_yup = true;
-        else if (!strcmp(argv[i], "-m"))
-            g_maxMipmapLevels = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "-x"))
-            memLimit = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--disp"))
-            g_displacementScale = (float)atof(argv[++i]);
+    for (size_t i = 0; i < argvRem.size(); ++i) {
+        if (!strcmp(argvRem[i], "-d"))
+            diffuseEnvironmentMap = argvRem[++i];
+        else if (!strcmp(argvRem[i], "-e"))
+            specularEnvironmentMap = argvRem[++i];
+        else if (!strcmp(argvRem[i], "-s"))
+            g_shaderFilename = argvRem[++i];
+        else if (!strcmp(argvRem[i], "-m"))
+            g_maxMipmapLevels = atoi(argvRem[++i]);
+        else if (!strcmp(argvRem[i], "-x"))
+            memLimit = atoi(argvRem[++i]);
+        else if (!strcmp(argvRem[i], "--disp"))
+            g_displacementScale = (float)atof(argvRem[++i]);
         else if (colorFilename == NULL) {
-            colorFilename = argv[i];
+            colorFilename = argvRem[i];
             colorMem = memLimit;
         } else if (displacementFilename == NULL) {
-            displacementFilename = argv[i];
+            displacementFilename = argvRem[i];
             displacementMem = memLimit;
             g_displacement = DISPLACEMENT_BILINEAR;
             g_normal = NORMAL_BIQUADRATIC;
         } else if (occlusionFilename == NULL) {
-            occlusionFilename = argv[i];
+            occlusionFilename = argvRem[i];
             occlusionMem = memLimit;
             g_occlusion = 1;
         } else if (specularFilename == NULL) {
-            specularFilename = argv[i];
+            specularFilename = argvRem[i];
             specularMem = memLimit;
             g_specular = 1;
         }
@@ -1815,26 +1805,13 @@ int main(int argc, char ** argv) {
     }
 
     glfwMakeContextCurrent(g_window);
+
+    GLUtils::InitializeGL();
     GLUtils::PrintGLVersion();
 
     glfwSetKeyCallback(g_window, keyboard);
     glfwSetCursorPosCallback(g_window, motion);
     glfwSetMouseButtonCallback(g_window, mouse);
-
-#if defined(OSD_USES_GLEW)
-#ifdef CORE_PROFILE
-    // this is the only way to initialize glew correctly under core profile context.
-    glewExperimental = true;
-#endif
-    if (GLenum r = glewInit() != GLEW_OK) {
-        printf("Failed to initialize glew. error = %d\n", r);
-        exit(1);
-    }
-#ifdef CORE_PROFILE
-    // clear GL errors which was generated during glewInit()
-    glGetError();
-#endif
-#endif
 
     initGL();
 
@@ -1847,7 +1824,7 @@ int main(int argc, char ** argv) {
     reshape();
 
     // activate feature adaptive tessellation if OSD supports it
-    g_adaptive = GLUtils::SupportsAdaptiveTessellation();
+    g_adaptive = g_adaptive && GLUtils::SupportsAdaptiveTessellation();
 
     int windowWidth = g_width, windowHeight = g_height;
 
@@ -2016,30 +1993,21 @@ int main(int argc, char ** argv) {
 
     // load animation obj sequences (optional)
     if (!animobjs.empty()) {
-        for (int i = 0; i < (int)animobjs.size(); ++i) {
-            std::ifstream ifs(animobjs[i].c_str());
-            if (ifs) {
-                std::stringstream ss;
-                ss << ifs.rdbuf();
-                ifs.close();
-
-                printf("Reading %s\r", animobjs[i].c_str());
-                std::string str = ss.str();
-                Shape *shape = Shape::parseObj(str.c_str(), kCatmark);
-
-                if (shape->verts.size() != g_positions.size()) {
-                    printf("Error: vertex count doesn't match.\n");
-                    goto error;
-                }
-
-                g_animPositions.push_back(shape->verts);
-                delete shape;
-            } else {
-                printf("Error in reading %s\n", animobjs[i].c_str());
-                goto error;
-            }
+        //  The Scheme passed here should ideally match the Ptex geometry (not the
+        //  defaults from the command line), but only the vertex positions of the
+        //  ObjAnim are used, so it is effectively ignored
+        g_objAnim = ObjAnim::Create(animobjs, kCatmark);
+        if (g_objAnim == 0) {
+            printf("Error in reading animation Obj file sequence\n");
+            goto error;
         }
-        printf("\n");
+
+        const Shape *animShape = g_objAnim->GetShape();
+        if (animShape->verts.size() != g_positions.size()) {
+            printf("Error in animation sequence, does not match ptex vertex count\n");
+            goto error;
+        }
+
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 

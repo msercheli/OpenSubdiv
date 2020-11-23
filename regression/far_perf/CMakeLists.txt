@@ -23,8 +23,7 @@
 #
 
 include_directories(
-    "${OPENSUBDIV_INCLUDE_DIR}/"
-    "${PROJECT_SOURCE_DIR}/"
+    "${OPENSUBDIV_INCLUDE_DIR}"
 )
 
 set(SOURCE_FILES
@@ -35,7 +34,7 @@ set(PLATFORM_LIBRARIES
     "${OSD_LINK_TARGET}"
 )
 
-_add_executable(far_perf "regression"
+osd_add_executable(far_perf "regression"
     ${SOURCE_FILES}
     $<TARGET_OBJECTS:sdc_obj>
     $<TARGET_OBJECTS:vtr_obj>

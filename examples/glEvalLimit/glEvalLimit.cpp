@@ -22,68 +22,71 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#include "../common/glUtils.h"
+#include "glLoader.h"
 
 #include <GLFW/glfw3.h>
 GLFWwindow* g_window=0;
 GLFWmonitor* g_primary=0;
 
-#include <osd/cpuEvaluator.h>
-#include <osd/cpuVertexBuffer.h>
-#include <osd/cpuPatchTable.h>
-#include <osd/cpuGLVertexBuffer.h>
-#include <osd/mesh.h>
+#include <opensubdiv/osd/cpuEvaluator.h>
+#include <opensubdiv/osd/cpuVertexBuffer.h>
+#include <opensubdiv/osd/cpuPatchTable.h>
+#include <opensubdiv/osd/cpuGLVertexBuffer.h>
+#include <opensubdiv/osd/mesh.h>
 
 #ifdef OPENSUBDIV_HAS_TBB
-    #include <osd/tbbEvaluator.h>
+    #include <opensubdiv/osd/tbbEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_OPENMP
-    #include <osd/ompEvaluator.h>
+    #include <opensubdiv/osd/ompEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_CUDA
-    #include <osd/cudaEvaluator.h>
-    #include <osd/cudaVertexBuffer.h>
-    #include <osd/cudaGLVertexBuffer.h>
-    #include <osd/cudaPatchTable.h>
+    #include <opensubdiv/osd/cudaEvaluator.h>
+    #include <opensubdiv/osd/cudaVertexBuffer.h>
+    #include <opensubdiv/osd/cudaGLVertexBuffer.h>
+    #include <opensubdiv/osd/cudaPatchTable.h>
     #include "../common/cudaDeviceContext.h"
 
     CudaDeviceContext g_cudaDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_OPENCL
-    #include <osd/clVertexBuffer.h>
-    #include <osd/clGLVertexBuffer.h>
-    #include <osd/clEvaluator.h>
-    #include <osd/clPatchTable.h>
+    #include <opensubdiv/osd/clVertexBuffer.h>
+    #include <opensubdiv/osd/clGLVertexBuffer.h>
+    #include <opensubdiv/osd/clEvaluator.h>
+    #include <opensubdiv/osd/clPatchTable.h>
     #include "../common/clDeviceContext.h"
     CLDeviceContext g_clDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK
-    #include <osd/glXFBEvaluator.h>
-    #include <osd/glVertexBuffer.h>
-    #include <osd/glPatchTable.h>
+    #include <opensubdiv/osd/glXFBEvaluator.h>
+    #include <opensubdiv/osd/glVertexBuffer.h>
+    #include <opensubdiv/osd/glPatchTable.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_GLSL_COMPUTE
-    #include <osd/glComputeEvaluator.h>
-    #include <osd/glVertexBuffer.h>
-    #include <osd/glPatchTable.h>
+    #include <opensubdiv/osd/glComputeEvaluator.h>
+    #include <opensubdiv/osd/glVertexBuffer.h>
+    #include <opensubdiv/osd/glPatchTable.h>
 #endif
 
-#include <far/topologyRefiner.h>
-#include <far/stencilTableFactory.h>
-#include <far/patchTableFactory.h>
+#include <opensubdiv/far/topologyRefiner.h>
+#include <opensubdiv/far/stencilTableFactory.h>
+#include <opensubdiv/far/patchTableFactory.h>
 
-#include <far/error.h>
+#include <opensubdiv/far/error.h>
 
 #include "../../regression/common/far_utils.h"
+#include "../../regression/common/arg_utils.h"
+#include "../common/viewerArgsUtils.h"
 #include "../common/stopwatch.h"
 #include "../common/simple_math.h"
 #include "../common/glControlMeshDisplay.h"
 #include "../common/glHud.h"
+#include "../common/glUtils.h"
 
 #include "init_shapes.h"
 #include "particles.h"
@@ -106,7 +109,8 @@ enum KernelType { kCPU = 0,
                   kGLXFB = 5,
                   kGLCompute = 6 };
 
-enum EndCap      { kEndCapBSplineBasis,
+enum EndCap      { kEndCapBilinearBasis,
+                   kEndCapBSplineBasis,
                    kEndCapGregoryBasis };
 
 enum HudCheckBox { kHUD_CB_DISPLAY_CONTROL_MESH_EDGES,
@@ -115,6 +119,9 @@ enum HudCheckBox { kHUD_CB_DISPLAY_CONTROL_MESH_EDGES,
                    kHUD_CB_ANIMATE_PARTICLES,
                    kHUD_CB_RANDOM_START,
                    kHUD_CB_FREEZE,
+                   kHUD_CB_ADAPTIVE,
+                   kHUD_CB_SMOOTH_CORNER_PATCH,
+                   kHUD_CB_SINGLE_CREASE_PATCH,
                    kHUD_CB_INF_SHARP_PATCH };
 
 enum DrawMode { kUV,
@@ -129,10 +136,13 @@ std::vector<float> g_orgPositions,
                    g_varyingColors;
 
 int g_currentShape = 0,
-    g_level = 3,
+    g_adaptive = 1,
+    g_level = 2,
     g_kernel = kCPU,
-    g_endCap = kEndCapBSplineBasis,
-    g_infSharpPatch = 0,
+    g_endCap = kEndCapGregoryBasis,
+    g_smoothCornerPatch = 1,
+    g_singleCreasePatch = 0,
+    g_infSharpPatch = 1,
     g_numElements = 3;
 
 int   g_running = 1,
@@ -153,6 +163,8 @@ float g_rotate[2] = {0, 0},
       g_center[3] = {0, 0, 0},
       g_size = 0,
       g_moveScale = 0.0f;
+
+bool  g_yup = false;
 
 GLuint g_transformUB = 0,
        g_transformBinding = 0;
@@ -603,17 +615,17 @@ updateGeom() {
 static void
 createOsdMesh(ShapeDesc const & shapeDesc, int level) {
 
-    Shape * shape = Shape::parseObj(shapeDesc.data.c_str(), shapeDesc.scheme);
+    Shape * shape = Shape::parseObj(shapeDesc);
 
     // create Far mesh (topology)
-    OpenSubdiv::Sdc::SchemeType sdctype = GetSdcType(*shape);
-    OpenSubdiv::Sdc::Options sdcoptions = GetSdcOptions(*shape);
+    Sdc::SchemeType sdctype = GetSdcType(*shape);
+    Sdc::Options sdcoptions = GetSdcOptions(*shape);
 
     sdcoptions.SetFVarLinearInterpolation(g_fvarBoundary);
 
     Far::TopologyRefiner *topologyRefiner =
-        OpenSubdiv::Far::TopologyRefinerFactory<Shape>::Create(*shape,
-            OpenSubdiv::Far::TopologyRefinerFactory<Shape>::Options(sdctype, sdcoptions));
+        Far::TopologyRefinerFactory<Shape>::Create(*shape,
+            Far::TopologyRefinerFactory<Shape>::Options(sdctype, sdcoptions));
 
     g_orgPositions=shape->verts;
     g_positions.resize(g_orgPositions.size(), 0.0f);
@@ -656,15 +668,13 @@ createOsdMesh(ShapeDesc const & shapeDesc, int level) {
     bool hasFVarData = !shape->uvs.empty();
 
     {
-        bool adaptive = (sdctype == OpenSubdiv::Sdc::SCHEME_CATMARK);
-        bool doInfSharpPatch = (g_infSharpPatch!=0 && adaptive);
-
-        if (adaptive) {
+        if (g_adaptive) {
             // Apply feature adaptive refinement to the mesh so that we can use the
             // limit evaluation API features.
             Far::TopologyRefiner::AdaptiveOptions options(level);
             options.considerFVarChannels = hasFVarData;
-            options.useInfSharpPatch = doInfSharpPatch;
+            options.useSingleCreasePatch = g_singleCreasePatch;
+            options.useInfSharpPatch = g_infSharpPatch;
             topologyRefiner->RefineAdaptive(options);
         } else {
             Far::TopologyRefiner::UniformOptions options(level);
@@ -676,7 +686,7 @@ createOsdMesh(ShapeDesc const & shapeDesc, int level) {
         // interpolation)
         Far::StencilTableFactory::Options soptions;
         soptions.generateOffsets=true;
-        soptions.generateIntermediateLevels=adaptive;
+        soptions.generateIntermediateLevels=g_adaptive;
 
         vertexStencils =
             Far::StencilTableFactory::Create(*topologyRefiner, soptions);
@@ -694,16 +704,22 @@ createOsdMesh(ShapeDesc const & shapeDesc, int level) {
 
         // Generate bi-cubic patch table for the limit surface
         Far::PatchTableFactory::Options poptions(level);
-        if (g_endCap == kEndCapBSplineBasis) {
+        if (g_endCap == kEndCapBilinearBasis) {
+            poptions.SetEndCapType(
+                Far::PatchTableFactory::Options::ENDCAP_BILINEAR_BASIS);
+        } else if (g_endCap == kEndCapBSplineBasis) {
             poptions.SetEndCapType(
                 Far::PatchTableFactory::Options::ENDCAP_BSPLINE_BASIS);
         } else {
             poptions.SetEndCapType(
                 Far::PatchTableFactory::Options::ENDCAP_GREGORY_BASIS);
         }
-        poptions.useInfSharpPatch = doInfSharpPatch;
+        poptions.generateLegacySharpCornerPatches = !g_smoothCornerPatch;
+        poptions.useSingleCreasePatch = g_singleCreasePatch;
+        poptions.useInfSharpPatch = g_infSharpPatch;
         poptions.generateFVarTables = hasFVarData;
         poptions.generateFVarLegacyLinearPatches = false;
+        poptions.includeFVarBaseLevelIndices = true;;
 
         Far::PatchTable const * patchTable =
             Far::PatchTableFactory::Create(*topologyRefiner, poptions);
@@ -1051,7 +1067,9 @@ display() {
     translate(g_transformData.ModelViewMatrix, -g_pan[0], -g_pan[1], -g_dolly);
     rotate(g_transformData.ModelViewMatrix, g_rotate[1], 1, 0, 0);
     rotate(g_transformData.ModelViewMatrix, g_rotate[0], 0, 1, 0);
-    rotate(g_transformData.ModelViewMatrix, -90, 1, 0, 0);
+    if (!g_yup) {
+        rotate(g_transformData.ModelViewMatrix, -90, 1, 0, 0);
+    }
     translate(g_transformData.ModelViewMatrix,
               -g_center[0], -g_center[1], -g_center[2]);
     perspective(g_transformData.ProjectionMatrix,
@@ -1221,8 +1239,8 @@ keyboard(GLFWwindow *, int key, int /* scancode */, int event, int /* mods */) {
 //------------------------------------------------------------------------------
 static void
 callbackError(OpenSubdiv::Far::ErrorType err, const char *message) {
-    printf("Error: %d\n", err);
-    printf("%s", message);
+    printf("OpenSubdiv Error: %d\n", err);
+    printf("    %s\n", message);
 }
 
 //------------------------------------------------------------------------------
@@ -1308,6 +1326,18 @@ callbackCheckBox(bool checked, int button) {
     case kHUD_CB_FREEZE:
         g_freeze = checked;
         break;
+    case kHUD_CB_ADAPTIVE:
+        g_adaptive = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        break;
+    case kHUD_CB_SMOOTH_CORNER_PATCH:
+        g_smoothCornerPatch = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        return;
+    case kHUD_CB_SINGLE_CREASE_PATCH:
+        g_singleCreasePatch = checked;
+        createOsdMesh(g_defaultShapes[g_currentShape], g_level);
+        return;
     case kHUD_CB_INF_SHARP_PATCH:
         g_infSharpPatch = checked;
         createOsdMesh(g_defaultShapes[g_currentShape], g_level);
@@ -1371,18 +1401,6 @@ initHUD() {
     }
 #endif
 
-    g_hud.AddCheckBox("Inf Sharp Patch (I)", g_infSharpPatch!=0,
-                      10, 130, callbackCheckBox, kHUD_CB_INF_SHARP_PATCH, 'i');
-
-    int endcap_pulldown = g_hud.AddPullDown("End cap (E)", 10, 150, 200,
-                                            callbackEndCap, 'e');
-    g_hud.AddPullDownButton(endcap_pulldown, "BSpline",
-        kEndCapBSplineBasis,
-        g_endCap == kEndCapBSplineBasis);
-    g_hud.AddPullDownButton(endcap_pulldown, "GregoryBasis",
-        kEndCapGregoryBasis,
-        g_endCap == kEndCapGregoryBasis);
-
     int shading_pulldown = g_hud.AddPullDown("Shading (W)", 250, 10, 250, callbackDisplayVaryingColors, 'w');
     g_hud.AddPullDownButton(shading_pulldown, "(u,v)", kUV, g_drawMode==kUV);
     g_hud.AddPullDownButton(shading_pulldown, "Varying", kVARYING, g_drawMode==kVARYING);
@@ -1391,10 +1409,28 @@ initHUD() {
     g_hud.AddPullDownButton(shading_pulldown, "FaceVarying", kFACEVARYING, g_drawMode==kFACEVARYING);
     g_hud.AddPullDownButton(shading_pulldown, "Mean Curvature", kMEAN_CURVATURE, g_drawMode==kMEAN_CURVATURE);
 
+    g_hud.AddCheckBox("Adaptive (`)", g_adaptive != 0, 10, 150, callbackCheckBox, kHUD_CB_ADAPTIVE, '`');
+
+    g_hud.AddCheckBox("Smooth Corner Patch (O)", g_smoothCornerPatch!=0,
+                      10, 170, callbackCheckBox, kHUD_CB_SMOOTH_CORNER_PATCH, 'o');
+//  g_hud.AddCheckBox("Single Crease Patch (S)", g_singleCreasePatch!=0,
+//                    10, 190, callbackCheckBox, kHUD_CB_SINGLE_CREASE_PATCH, 's');
+    g_hud.AddCheckBox("Inf Sharp Patch (I)", g_infSharpPatch!=0,
+                      10, 190, callbackCheckBox, kHUD_CB_INF_SHARP_PATCH, 'i');
+
+    int endcap_pulldown = g_hud.AddPullDown("End cap (E)", 10, 230, 200,
+                                            callbackEndCap, 'e');
+    g_hud.AddPullDownButton(endcap_pulldown, "Linear", kEndCapBilinearBasis,
+                            g_endCap == kEndCapBilinearBasis);
+    g_hud.AddPullDownButton(endcap_pulldown, "Regular", kEndCapBSplineBasis,
+                            g_endCap == kEndCapBSplineBasis);
+    g_hud.AddPullDownButton(endcap_pulldown, "Gregory", kEndCapGregoryBasis,
+                            g_endCap == kEndCapGregoryBasis);
+
     for (int i = 1; i < 11; ++i) {
         char level[16];
         sprintf(level, "Lv. %d", i);
-        g_hud.AddRadioButton(3, level, i==g_level, 10, 170+i*20, callbackLevel, i, '0'+(i%10));
+        g_hud.AddRadioButton(3, level, i==g_level, 10, 270+i*20, callbackLevel, i, '0'+(i%10));
     }
 
     int pulldown_handle = g_hud.AddPullDown("Shape (N)", -300, 10, 300, callbackModel, 'n');
@@ -1432,27 +1468,21 @@ callbackErrorGLFW(int error, const char* description) {
 //------------------------------------------------------------------------------
 int main(int argc, char **argv) {
 
-    bool fullscreen = false;
+    ArgOptions args;
 
-    std::string str;
-    for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "-f"))
-            fullscreen = true;
-        else {
-            std::ifstream ifs(argv[1]);
-            if (ifs) {
-                std::stringstream ss;
-                ss << ifs.rdbuf();
-                ifs.close();
-                str = ss.str();
-                g_defaultShapes.push_back(ShapeDesc(argv[1], str.c_str(), kCatmark));
-            }
-        }
-    }
+    args.Parse(argc, argv);
+    args.PrintUnrecognizedArgsWarnings();
 
-    Far::SetErrorCallback(callbackError);
+    g_yup = args.GetYUp();
+    g_adaptive = args.GetAdaptive();
+    g_level = args.GetLevel();
+    g_repeatCount = args.GetRepeatCount();
+
+    ViewerArgsUtils::PopulateShapes(args, &g_defaultShapes);
 
     initShapes();
+
+    Far::SetErrorCallback(callbackError);
 
     glfwSetErrorCallback(callbackErrorGLFW);
     if (! glfwInit()) {
@@ -1464,7 +1494,7 @@ int main(int argc, char **argv) {
 
     GLUtils::SetMinimumGLVersion();
 
-    if (fullscreen) {
+    if (args.GetFullScreen()) {
 
         g_primary = glfwGetPrimaryMonitor();
 
@@ -1486,13 +1516,15 @@ int main(int argc, char **argv) {
     }
 
     if (! (g_window=glfwCreateWindow(g_width, g_height, windowTitle,
-                                     fullscreen && g_primary ? g_primary : NULL, NULL))) {
+             args.GetFullScreen() && g_primary ? g_primary : NULL, NULL))) {
         std::cerr << "Failed to create OpenGL context.\n";
         glfwTerminate();
         return 1;
     }
 
     glfwMakeContextCurrent(g_window);
+
+    GLUtils::InitializeGL();
     GLUtils::PrintGLVersion();
 
     // accommodate high DPI displays (e.g. mac retina displays)
@@ -1503,27 +1535,6 @@ int main(int argc, char **argv) {
     glfwSetCursorPosCallback(g_window, motion);
     glfwSetMouseButtonCallback(g_window, mouse);
     glfwSetWindowCloseCallback(g_window, windowClose);
-
-#if defined(OSD_USES_GLEW)
-#ifdef CORE_PROFILE
-    // this is the only way to initialize glew correctly under core profile context.
-    glewExperimental = true;
-#endif
-    if (GLenum r = glewInit() != GLEW_OK) {
-        printf("Failed to initialize glew. Error = %s\n", glewGetErrorString(r));
-        exit(1);
-    }
-#ifdef CORE_PROFILE
-    // clear GL errors which was generated during glewInit()
-    glGetError();
-#endif
-#endif
-
-    //std::string & data = g_defaultShapes[ g_currentShape ].data;
-    //Scheme scheme = g_defaultShapes[ g_currentShape ].scheme;
-
-    //createOsdMesh( data, g_level, scheme );
-
     initGL();
     linkDefaultProgram();
 

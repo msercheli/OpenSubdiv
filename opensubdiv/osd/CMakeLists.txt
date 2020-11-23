@@ -53,7 +53,9 @@ set(PUBLIC_HEADER_FILES
 )
 
 list(APPEND KERNEL_FILES
+    patchBasisCommonTypes.h
     patchBasisCommon.h
+    patchBasisCommonEval.h
 )
 
 set(DOXY_HEADER_FILES ${PUBLIC_HEADER_FILES})
@@ -129,9 +131,13 @@ if( (NOT NO_OPENGL) AND (OPENGL_FOUND OR OPENGLES_FOUND) )
     if ( OPENGL_FOUND )
         list(APPEND KERNEL_FILES
             glslPatchCommon.glsl
+            glslPatchCommonTess.glsl
+            glslPatchBoxSplineTriangle.glsl
             glslPatchBSpline.glsl
             glslPatchGregory.glsl
             glslPatchGregoryBasis.glsl
+            glslPatchGregoryTriangle.glsl
+            glslPatchLegacy.glsl
         )
     endif()
 endif()
@@ -154,7 +160,7 @@ if( OPENGL_4_2_FOUND )
         glslXFBKernel.glsl
     )
     list(APPEND PLATFORM_GPU_LIBRARIES
-        ${GLEW_LIBRARY}
+        ${OPENGL_LOADER_LIBRARIES}
     )
 endif()
 
@@ -177,7 +183,7 @@ if( OPENGL_4_3_FOUND )
         glslComputeKernel.glsl
     )
     list(APPEND PLATFORM_GPU_LIBRARIES
-        ${GLEW_LIBRARY}
+        ${OPENGL_LOADER_LIBRARIES}
     )
 endif()
 
@@ -207,9 +213,13 @@ if( DXSDK_FOUND )
     list(APPEND KERNEL_FILES
         hlslComputeKernel.hlsl
         hlslPatchCommon.hlsl
+        hlslPatchCommonTess.hlsl
+        hlslPatchBoxSplineTriangle.hlsl
         hlslPatchBSpline.hlsl
         hlslPatchGregory.hlsl
         hlslPatchGregoryBasis.hlsl
+        hlslPatchGregoryTriangle.hlsl
+        hlslPatchLegacy.hlsl
     )
     list(APPEND PLATFORM_GPU_LIBRARIES
         ${DXSDK_LIBRARIES}
@@ -255,9 +265,13 @@ if( METAL_FOUND )
     list(APPEND KERNEL_FILES
        mtlComputeKernel.metal
        mtlPatchCommon.metal
+       mtlPatchCommonTess.metal
+       mtlPatchBoxSplineTriangle.metal
        mtlPatchBSpline.metal
        mtlPatchGregory.metal
        mtlPatchGregoryBasis.metal
+       mtlPatchGregoryTriangle.metal
+       mtlPatchLegacy.metal
     )
     list(APPEND PLATFORM_GPU_LIBRARIES
         ${METAL_LIBRARIES}
@@ -348,7 +362,7 @@ list(APPEND DOXY_HEADER_FILES ${CUDA_PUBLIC_HEADERS})
 
 #-------------------------------------------------------------------------------
 
-_stringify("${KERNEL_FILES}" INC_FILES)
+osd_stringify("${KERNEL_FILES}" INC_FILES)
 
 include_directories("${CMAKE_CURRENT_BINARY_DIR}")
 
@@ -384,7 +398,7 @@ if( GPU_SOURCE_FILES )
     )
 endif()
 
-_add_doxy_headers( "${DOXY_HEADER_FILES}" )
+osd_add_doxy_headers( "${DOXY_HEADER_FILES}" )
 
 install(
     FILES

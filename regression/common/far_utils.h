@@ -25,27 +25,45 @@
 #ifndef FAR_UTILS_H
 #define FAR_UTILS_H
 
-#include <far/topologyRefinerFactory.h>
-#include <far/primvarRefiner.h>
-#include <far/types.h>
+#include "shape_utils.h"
+
+#include <opensubdiv/far/topologyRefinerFactory.h>
+#include <opensubdiv/far/primvarRefiner.h>
+#include <opensubdiv/far/types.h>
 
 #include <cstdio>
 
-#include "shape_utils.h"
 
 //------------------------------------------------------------------------------
+
+inline Scheme
+ConvertSdcTypeToShapeScheme(OpenSubdiv::Sdc::SchemeType sdcScheme) {
+
+    switch (sdcScheme) {
+        case OpenSubdiv::Sdc::SCHEME_BILINEAR: return kBilinear;
+        case OpenSubdiv::Sdc::SCHEME_CATMARK:  return kCatmark;
+        case OpenSubdiv::Sdc::SCHEME_LOOP:     return kLoop;
+        default: printf("unknown Sdc::SchemeType : %d\n", (int)sdcScheme); break;
+    }
+    return kCatmark;
+}
+
+inline OpenSubdiv::Sdc::SchemeType
+ConvertShapeSchemeToSdcType(Scheme shapeScheme) {
+
+    switch (shapeScheme) {
+        case kBilinear: return OpenSubdiv::Sdc::SCHEME_BILINEAR;
+        case kCatmark:  return OpenSubdiv::Sdc::SCHEME_CATMARK;
+        case kLoop:     return OpenSubdiv::Sdc::SCHEME_LOOP;
+        default: printf("unknown Shape Scheme : %d\n", (int)shapeScheme); break;
+    }
+    return OpenSubdiv::Sdc::SCHEME_CATMARK;
+}
 
 inline OpenSubdiv::Sdc::SchemeType
 GetSdcType(Shape const & shape) {
 
-    OpenSubdiv::Sdc::SchemeType type=OpenSubdiv::Sdc::SCHEME_CATMARK;
-
-    switch (shape.scheme) {
-        case kBilinear: type = OpenSubdiv::Sdc::SCHEME_BILINEAR; break;
-        case kCatmark : type = OpenSubdiv::Sdc::SCHEME_CATMARK; break;
-        case kLoop    : type = OpenSubdiv::Sdc::SCHEME_LOOP; break;
-    }
-    return type;
+    return ConvertShapeSchemeToSdcType(shape.scheme);
 }
 
 inline OpenSubdiv::Sdc::Options

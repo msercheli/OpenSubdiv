@@ -84,7 +84,9 @@ public:
     SourcePatch() { std::memset(this, 0, sizeof(SourcePatch)); }
     ~SourcePatch() { }
 
-    void Finalize();  //  To be called after all Corners have been initialized
+    //  To be called after all Corners have been initialized (hope to
+    //  replace this with alternative constructor at some point)
+    void Finalize(int size3or4);
 
     int GetNumSourcePoints() const { return _numSourcePoints; }
     int GetMaxValence() const { return _maxValence; }
@@ -93,13 +95,12 @@ public:
     int GetCornerRingSize(int corner) const { return _ringSizes[corner]; }
     int GetCornerRingPoints(int corner, int points[]) const;
 
-    void Print(const char * label, const Index * patchPoints = 0);
-
 //  public/private access needs to be reviewed when/if used more publicly
 //private:
 public:
     //  The SourcePatch is fully defined by its Corner members
     Corner _corners[4];
+    int    _numCorners;
 
     //  Additional members (derived from Corners) to help assemble corner rings:
     int _numSourcePoints;
@@ -116,13 +117,20 @@ public:
 //  PatchBuilder
 //
 //  This is the main class to assist the identification of limit surface
-//  patches for assembly into other, larger datatypes.  The PatchBuilder takes
-//  a const reference to a TopologyRefiner and is intended to support both
-//  adaptive and uniformly refined hierarchies.
+//  patches from faces in a TopologyRefiner for assembly into other, larger
+//  datatypes.
+//
+//  The PatchBuilder takes a const reference to a refiner and supports
+//  arbitrarily refined hierarchies, i.e. it is not restricted to uniform or
+//  adaptive refinement strategies and does not include any logic relating
+//  to the origin of the hierarchy.  It can associate a patch with any face
+//  in the hierarchy (subject to a few minimum requirements) -- leaving the
+//  decision as to which faces/patches are appropriate to its client.
 //
 //  PatchBuilder is an abstract base class with a subclass derived to support
-//  each subdivision scheme.  Only two (pure) virtual methods are required
-//  (other than the required destructor):
+//  each subdivision scheme -- as such, construction relies on a factory
+//  method to create an instance of the appropriate subclass.  Only two pure
+//  virtual methods are required (other than the required destructor):
 //
 //      - determine the patch type for a subdivision scheme given a more
 //        general basis specification (e.g. Bezier, Gregory, Linear, etc)
@@ -178,6 +186,9 @@ public:
     };
 
 public:
+    //
+    //  Public construction (via factory method) and destruction:
+    //
     static PatchBuilder* Create(TopologyRefiner const& refiner,
                                 Options const& options);
     virtual ~PatchBuilder();
@@ -226,9 +237,10 @@ public:
             Index patchPoints[],
             int fvc = -1) const;
 
+    template <typename REAL>
     int GetIrregularPatchConversionMatrix(int level, Index face,
             Vtr::internal::Level::VSpan const cornerSpans[],
-            SparseMatrix<float> &             matrix) const;
+            SparseMatrix<REAL> &              matrix) const;
 
     int GetIrregularPatchSourcePoints(int level, Index face,
             Vtr::internal::Level::VSpan const cornerSpans[],
@@ -256,15 +268,13 @@ public:
     //  data to accelerate these computations.
     //
     PatchParam ComputePatchParam(int level, Index face,
-            PtexIndices const& ptexIndices,
+            PtexIndices const& ptexIndices, bool isRegular = true,
             int boundaryMask = 0, bool computeTransitionMask = false) const;
 
 protected:
     PatchBuilder(TopologyRefiner const& refiner, Options const& options);
 
     //  Internal methods supporting topology queries:
-    bool isPatchSmoothCorner(int level, Index face, int fvc) const;
-
     int getRegularFacePoints(int level, Index face,
             Index patchPoints[], int fvc) const;
 
@@ -284,18 +294,19 @@ protected:
             SourcePatch &  sourcePatch,
             Index patchPoints[], int fvc) const;
 
-    //  Internal methods asserting features not yet completed:
-    void assertTriangularPatchesNotYetSupportedHere() const;
-
 protected:
     //
     //  Virtual methods to be provided by subclass for each scheme:
     //
     virtual PatchDescriptor::Type patchTypeFromBasis(BasisType basis) const = 0;
 
+    //  Note overloading of the conversion for SparseMatrix<REAL>:
     virtual int convertToPatchType(SourcePatch const &   sourcePatch,
                                    PatchDescriptor::Type patchType,
                                    SparseMatrix<float> & matrix) const = 0;
+    virtual int convertToPatchType(SourcePatch const &    sourcePatch,
+                                   PatchDescriptor::Type  patchType,
+                                   SparseMatrix<double> & matrix) const = 0;
 
 protected:
     TopologyRefiner const& _refiner;
@@ -303,7 +314,7 @@ protected:
 
     Sdc::SchemeType _schemeType;
     int             _schemeRegFaceSize;
-    int             _schemeNeighborhood;
+    bool            _schemeIsLinear;
 
     PatchDescriptor::Type _regPatchType;
     PatchDescriptor::Type _irregPatchType;

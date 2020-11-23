@@ -22,61 +22,63 @@
 //   language governing permissions and limitations under the Apache License.
 //
 
-#include "../common/glUtils.h"
+#include "glLoader.h"
 
 #include <GLFW/glfw3.h>
 GLFWwindow* g_window=0;
 GLFWmonitor* g_primary=0;
 
-#include <far/error.h>
-#include <far/stencilTable.h>
-#include <far/ptexIndices.h>
+#include <opensubdiv/far/error.h>
+#include <opensubdiv/far/stencilTable.h>
+#include <opensubdiv/far/ptexIndices.h>
 
-#include <osd/mesh.h>
-#include <osd/glVertexBuffer.h>
-#include <osd/cpuGLVertexBuffer.h>
-#include <osd/cpuEvaluator.h>
+#include <opensubdiv/osd/mesh.h>
+#include <opensubdiv/osd/glVertexBuffer.h>
+#include <opensubdiv/osd/cpuGLVertexBuffer.h>
+#include <opensubdiv/osd/cpuEvaluator.h>
 
 #ifdef OPENSUBDIV_HAS_OPENMP
-    #include <osd/ompEvaluator.h>
+    #include <opensubdiv/osd/ompEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_TBB
-    #include <osd/tbbEvaluator.h>
+    #include <opensubdiv/osd/tbbEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_OPENCL
-    #include <osd/clGLVertexBuffer.h>
-    #include <osd/clEvaluator.h>
+    #include <opensubdiv/osd/clGLVertexBuffer.h>
+    #include <opensubdiv/osd/clEvaluator.h>
     #include "../common/clDeviceContext.h"
     CLDeviceContext g_clDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_CUDA
-    #include <osd/cudaGLVertexBuffer.h>
-    #include <osd/cudaEvaluator.h>
+    #include <opensubdiv/osd/cudaGLVertexBuffer.h>
+    #include <opensubdiv/osd/cudaEvaluator.h>
     #include "../common/cudaDeviceContext.h"
     CudaDeviceContext g_cudaDeviceContext;
 #endif
 
 #ifdef OPENSUBDIV_HAS_GLSL_TRANSFORM_FEEDBACK
-    #include <osd/glXFBEvaluator.h>
+    #include <opensubdiv/osd/glXFBEvaluator.h>
 #endif
 
 #ifdef OPENSUBDIV_HAS_GLSL_COMPUTE
-    #include <osd/glComputeEvaluator.h>
+    #include <opensubdiv/osd/glComputeEvaluator.h>
 #endif
 
 
 #include "../../regression/common/far_utils.h"
 #include "init_shapes.h"
 
+#include "../../regression/common/arg_utils.h"
 #include "../common/stopwatch.h"
 #include "../common/simple_math.h"
 #include "../common/glHud.h"
 #include "../common/glShaderCache.h"
+#include "../common/glUtils.h"
 
-#include <osd/glslPatchShaderSource.h>
+#include <opensubdiv/osd/glslPatchShaderSource.h>
 static const char *shaderSource =
 #include "shader.gen.h"
 ;
@@ -146,7 +148,7 @@ float g_cpuTime = 0;
 float g_gpuTime = 0;
 Stopwatch g_fpsTimer;
 
-int g_level = 1;
+int g_level = 2;
 int g_tessLevel = 1;
 int g_tessLevelMin = 1;
 int g_frame = 0;
@@ -372,6 +374,10 @@ public:
             ss << "#define OSD_PATCH_GREGORY_BOUNDARY\n";
         } else if (type == Far::PatchDescriptor::GREGORY_BASIS) {
             ss << "#define OSD_PATCH_GREGORY_BASIS\n";
+        } else if (type == Far::PatchDescriptor::LOOP) {
+            ss << "#define OSD_PATCH_LOOP\n";
+        } else if (type == Far::PatchDescriptor::GREGORY_TRIANGLE) {
+            ss << "#define OSD_PATCH_GREGORY_TRIANGLE\n";
         }
 
         // for legacy gregory
@@ -923,10 +929,7 @@ rebuildTopology() {
     }
 
     for (int i = 0; i < (int)g_defaultShapes.size(); ++i) {
-        Shape const * shape = Shape::parseObj(
-            g_defaultShapes[i].data.c_str(),
-            g_defaultShapes[i].scheme,
-            g_defaultShapes[i].isLeftHanded);
+        Shape const * shape = Shape::parseObj(g_defaultShapes[i]);
 
         bool varying = (g_displayStyle==kVarying || g_displayStyle==kVaryingInterleaved);
         g_scene->AddTopology(shape, g_level, varying);
@@ -1088,8 +1091,7 @@ initHUD() {
     g_hud.AddPullDownButton(compute_pulldown, "GLSL TransformFeedback", kGLSL);
 #endif
 #ifdef OPENSUBDIV_HAS_GLSL_COMPUTE
-    // Must also check at run time for OpenGL 4.3
-    if (GLEW_VERSION_4_3) {
+    if (GLUtils::GL_ARBComputeShaderOrGL_VERSION_4_3()) {
         g_hud.AddPullDownButton(compute_pulldown, "GLSL Compute", kGLSLCompute);
     }
 #endif
@@ -1107,10 +1109,10 @@ initHUD() {
 
         int endcap_pulldown = g_hud.AddPullDown(
             "End cap (E)", 10, 210, 200, callbackEndCap, 'e');
-        g_hud.AddPullDownButton(endcap_pulldown, "BSpline",
+        g_hud.AddPullDownButton(endcap_pulldown, "Regular",
                                 SceneBase::kEndCapBSplineBasis,
                                 g_options.endCap == SceneBase::kEndCapBSplineBasis);
-        g_hud.AddPullDownButton(endcap_pulldown, "GregoryBasis",
+        g_hud.AddPullDownButton(endcap_pulldown, "Gregory",
                                 SceneBase::kEndCapGregoryBasis,
                                 g_options.endCap == SceneBase::kEndCapGregoryBasis);
     }
@@ -1119,7 +1121,7 @@ initHUD() {
     for (int i = 1; i < 11; ++i) {
         char level[16];
         sprintf(level, "Lv. %d", i);
-        g_hud.AddRadioButton(3, level, i==2, 10, 210+i*20, callbackLevel, i, '0'+(i%10));
+        g_hud.AddRadioButton(3, level, i==g_level, 10, 210+i*20, callbackLevel, i, '0'+(i%10));
     }
 
     g_hud.Rebuild(windowWidth, windowHeight, frameBufferWidth, frameBufferHeight);
@@ -1153,8 +1155,8 @@ idle() {
 //------------------------------------------------------------------------------
 static void
 callbackError(Far::ErrorType err, const char *message) {
-    printf("Error: %d\n", err);
-    printf("%s", message);
+    printf("OpenSubdiv Error: %d\n", err);
+    printf("    %s\n", message);
 }
 
 //------------------------------------------------------------------------------
@@ -1166,12 +1168,14 @@ callbackErrorGLFW(int error, const char* description) {
 
 int main(int argc, char ** argv) {
 
-    std::string str;
-    for (int i = 1; i < argc; ++i) {
-        if (!strcmp(argv[i], "-d")) {
-            g_level = atoi(argv[++i]);
-        }
-    }
+    ArgOptions args;
+
+    args.Parse(argc, argv);
+    args.PrintUnrecognizedArgsWarnings();
+
+    g_options.adaptive = args.GetAdaptive();
+    g_level = args.GetLevel();
+
     Far::SetErrorCallback(callbackError);
 
     glfwSetErrorCallback(callbackErrorGLFW);
@@ -1191,6 +1195,8 @@ int main(int argc, char ** argv) {
     }
 
     glfwMakeContextCurrent(g_window);
+
+    GLUtils::InitializeGL();
     GLUtils::PrintGLVersion();
 
     // accommodate high DPI displays (e.g. mac retina displays)
@@ -1201,24 +1207,6 @@ int main(int argc, char ** argv) {
     glfwSetCursorPosCallback(g_window, motion);
     glfwSetMouseButtonCallback(g_window, mouse);
     glfwSetWindowCloseCallback(g_window, windowClose);
-
-#if defined(OSD_USES_GLEW)
-#ifdef CORE_PROFILE
-    // this is the only way to initialize glew correctly under core profile context.
-    glewExperimental = true;
-#endif
-    if (GLenum r = glewInit() != GLEW_OK) {
-        printf("Failed to initialize glew. Error = %s\n", glewGetErrorString(r));
-        exit(1);
-    }
-#ifdef CORE_PROFILE
-    // clear GL errors which were generated during glewInit()
-    glGetError();
-#endif
-#endif
-
-    // activate feature adaptive tessellation if OSD supports it
-    g_options.adaptive = true;
 
     initShapes();
     initGL();
