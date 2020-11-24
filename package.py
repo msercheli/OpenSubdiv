@@ -2,13 +2,16 @@
 
 name = "opensubdiv"
 
-version = "3.3.3"
+version = "3.4.3"
 
 authors = ["Pixar Animation Studio"]
 
 requires = [
     "tbb",
     "glew",
+    "glfw",
+    "ptex",
+    "python",
 ]
 
 def commands():
